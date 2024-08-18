@@ -1,0 +1,1 @@
+cargo run --bin api-doc --features api-doc > openapi.json

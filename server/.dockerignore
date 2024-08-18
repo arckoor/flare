@@ -1,0 +1,11 @@
+*
+!.cargo/*
+!prisma/*
+!prisma-cli/*
+!flare
+!flare-sim
+!flare-test
+flare/src/prisma.rs
+!Cargo.lock
+!Cargo.toml
+!openapi.sh

@@ -1,0 +1,6 @@
+!.vscode/extension.json
+.vscode/
+target
+server/flare/src/prisma.rs
+openapi.json
+.env

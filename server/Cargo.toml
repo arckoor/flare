@@ -1,0 +1,10 @@
+
+[workspace]
+members = [
+  "prisma-cli",
+  "flare",
+  "flare-sim",
+  "flare-test",
+]
+resolver = "2"
+

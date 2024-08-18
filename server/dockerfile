@@ -1,0 +1,17 @@
+FROM rust:1.80.1 AS builder
+
+WORKDIR /app
+
+COPY . .
+
+RUN cargo prisma generate
+
+RUN cargo build --bin flare --release
+
+FROM debian:stable-slim
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/flare /app/flare
+
+CMD [ "/app/flare" ]

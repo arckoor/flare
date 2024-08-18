@@ -1,0 +1,65 @@
+services:
+  server:
+    image: ghcr.io/arckoor/flare-server:latest
+    build: server
+    container_name: flare-server
+    restart: unless-stopped
+    ports:
+      - 8080:8080
+    environment:
+      - DATABASE_URL=postgres://flare:${PG_PASSWORD}@db:5432/flare-db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  frontend:
+    image: ghcr.io/arckoor/flare-frontend:latest
+    build: frontend
+    container_name: flare-frontend
+    restart: unless-stopped
+    ports:
+      - 3000:3000
+    depends_on:
+      - server
+  postgres:
+    image: postgres:16
+    container_name: flare-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flare
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: flare-db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - flare-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  redis:
+    image: redis:7-alpine
+    container_name: flare-redis
+    restart: unless-stopped
+    networks:
+      - flare-network
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+      - redis-data:/data
+    healthcheck:
+      test: redis-cli ping | grep PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+
+networks:
+  flare-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
