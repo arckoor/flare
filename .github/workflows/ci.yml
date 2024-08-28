@@ -16,23 +16,45 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-debug:
+  generate-prisma-client:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Generate prisma client
         run: cargo prisma generate
+      - name: Upload prisma client
+        uses: actions/upload-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src/prisma.rs
+          retention-days: 2
+
+  build-debug:
+    runs-on: ubuntu-latest
+    needs: [generate-prisma-client]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Download prisma client
+        uses: actions/download-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src
       - name: Build Debug
         run: cargo build
 
   build-release:
     runs-on: ubuntu-latest
+    needs: [generate-prisma-client]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Generate prisma client
-        run: cargo prisma generate
+      - name: Download prisma client
+        uses: actions/download-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src
       - name: Build Release
         run: cargo build --bin flare --release
       - name: Upload release artifact
@@ -44,11 +66,15 @@ jobs:
 
   fmt:
     runs-on: ubuntu-latest
+    needs: [generate-prisma-client] 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Generate prisma client
-        run: cargo prisma generate
+      - name: Download prisma client
+        uses: actions/download-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Format Check
@@ -56,22 +82,29 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    needs: [generate-prisma-client]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Generate prisma client
-        run: cargo prisma generate
+      - name: Download prisma client
+        uses: actions/download-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src
       - name: Lint Code
         run: cargo clippy -- -D warnings
 
   openapi:
     runs-on: ubuntu-latest
-    needs: [build-debug]
+    needs: [generate-prisma-client, build-debug]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Generate prisma client
-        run: cargo prisma generate
+      - name: Download prisma client
+        uses: actions/download-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src
       - name: Generate OpenAPI
         run: ./openapi.sh
       - name: Upload OpenAPI artifact
@@ -83,7 +116,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    needs: [build-debug]
+    needs: [generate-prisma-client, build-debug]
     services:
       postgres:
         image: postgres:16
@@ -110,8 +143,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Generate prisma client
-        run: cargo prisma generate
+      - name: Download prisma client
+        uses: actions/download-artifact@v4
+        with:
+          name: prisma.rs
+          path: server/flare/src
       - name: Install llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install nextest
