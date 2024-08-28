@@ -1,5 +1,7 @@
+use flare::config;
+
 #[tokio::main]
 async fn main() {
-    let path = std::env::current_dir().unwrap();
-    flare::launch(path).await.unwrap();
+    let config = config::config();
+    flare::launch(config).await.unwrap();
 }

@@ -1,0 +1,17 @@
+[backend.storage]
+base_path = ""
+database_url = "postgres://localhost:5432/flare-db"
+redis_url = "redis://localhost:6379"
+
+[backend.jwt]
+access_secret = "your_access_secret"
+refresh_secret = "your_refresh_secret"
+domain = "localhost"
+
+[backend.oauth]
+discord_client_id = "your_client_id"
+discord_client_secret = "your_client_secret"
+
+[server]
+port = 8080
+url = "http://example.com"

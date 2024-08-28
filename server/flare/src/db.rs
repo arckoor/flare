@@ -1,5 +1,6 @@
 use crate::{
     api::{api_params::LoginInfo, error::RestError},
+    config::StoreConfig,
     prisma::{credential_user, discord_user, user, Permissions, PrismaClient},
 };
 
@@ -9,7 +10,9 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn new() -> Self {
+    pub async fn new(config: &StoreConfig) -> Self {
+        std::env::set_var("DATABASE_URL", &config.storage.database_url);
+
         let prisma = PrismaClient::_builder()
             .build()
             .await
@@ -38,7 +41,7 @@ impl Database {
                 .expect("Failed to push database");
         }
 
-        let redis = redis::Client::open(dotenv::var("REDIS_URL").expect("REDIS_URL must be set"))
+        let redis = redis::Client::open(config.storage.redis_url.clone())
             .expect("Failed to create Redis client");
         #[cfg(feature = "sim")]
         {
@@ -75,7 +78,7 @@ impl Database {
                     .create(
                         user::id::equals(user.id),
                         login_info.username.clone(),
-                        login_info.password.clone(),
+                        login_info.password.unsecure().to_string(),
                         vec![],
                     )
                     .exec()

@@ -4,23 +4,23 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::{routing, Json, Router};
-
 use axum_extra::extract::CookieJar;
 use axum_extra::headers::authorization::Bearer;
 use axum_extra::headers::Authorization;
 use axum_extra::TypedHeader;
 use cookie::Cookie;
 use hyper::{header, StatusCode};
+use secstr::SecUtf8;
 use serde_json::json;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::prisma::Permissions;
+use crate::requires;
 use crate::store::Store;
 
 use super::api_params::{LoginInfo, TokenResponse};
 use super::error::RestError;
-
 use super::openapi::ApiDoc;
 
 pub fn build_router(state: Arc<Store>) -> Router {
@@ -89,7 +89,7 @@ async fn login(
     let user = store.db.get_credential_user(login_info.username).await?;
     if let Some(user) = user {
         // TODO this sucks, for obvious reasons
-        if user.password == login_info.password {
+        if SecUtf8::from(user.password) == login_info.password {
             let (access, jar) = store
                 .jwt
                 .login(
@@ -112,9 +112,9 @@ async fn oauth_login(
 ) -> Result<impl IntoResponse, RestError> {
     let redirect_uri = match query.get("redirect_uri") {
         Some(redirect_uri) => redirect_uri.clone(),
-        None => "http://localhost:3000".to_string(),
+        None => "http://localhost".to_string(),
     };
-    let (url, _) = store.d_oauth.auth_url(redirect_uri).await?;
+    let url = store.d_oauth.auth_url(redirect_uri).await?;
     Ok((StatusCode::FOUND, [(header::LOCATION, url.to_string())]))
 }
 
@@ -138,14 +138,9 @@ async fn oauth_callback(
         .get_or_create_discord_user(discord_id, discord_username)
         .await?;
 
-    let (access, jar) = store.jwt.login(&user, jar).await?;
+    let (_, jar) = store.jwt.login(&user, jar).await?;
 
-    Ok((
-        StatusCode::FOUND,
-        [(header::LOCATION, redirect_uri)],
-        jar,
-        Json(TokenResponse { access }),
-    ))
+    Ok((StatusCode::FOUND, [(header::LOCATION, redirect_uri)], jar))
 }
 
 async fn logout(
@@ -153,7 +148,7 @@ async fn logout(
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = store.jwt.validate(auth, vec![]).await?;
+    let claims = requires!(store, auth);
     store.jwt.revoke(claims.sub).await?;
     let jar = jar.remove(Cookie::from("refresh_token"));
 
@@ -184,10 +179,7 @@ async fn test_protected_route(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<impl IntoResponse, RestError> {
-    store
-        .jwt
-        .validate(auth, vec![Permissions::CreatePolls])
-        .await?;
+    requires!(store, auth, Permissions::CreatePolls);
 
     Ok(Json(
         json!({ "message": "You are authorized to view this" }),
@@ -198,10 +190,12 @@ async fn test_protected_route2(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
 ) -> Result<impl IntoResponse, RestError> {
-    store
-        .jwt
-        .validate(auth, vec![Permissions::DeletePolls])
-        .await?;
+    requires!(
+        store,
+        auth,
+        Permissions::DeletePolls,
+        Permissions::CreatePolls
+    );
 
     Ok(Json(
         json!({ "message": "You are authorized to view this" }),

@@ -2,6 +2,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
+use flare::config::FlareConfig;
 use tempfile::TempDir;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -11,7 +12,7 @@ use turmoil::{Result, Sim, ToIpAddr};
 use flare;
 
 pub const FLARE_SERVER: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
-pub const FLARE_PORT: u16 = 8080; // TODO this should be in a config or similar, settable from here
+pub const FLARE_PORT: u16 = 9000;
 pub const START_DELAY: Duration = Duration::from_secs(10);
 
 pub struct FlareSimulation<'a> {
@@ -25,9 +26,6 @@ pub struct FlareSimulation<'a> {
 impl<'a> FlareSimulation<'a> {
     pub fn new(sim: Sim<'a>) -> Self {
         dotenv::dotenv().ok();
-        let base_url = dotenv::var("DATABASE_BASE").expect("DATABASE_BASE must be set");
-        let db_url = format!("{}/flare-test-db", base_url);
-        std::env::set_var("DATABASE_URL", db_url);
 
         let subscriber = tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer().with_test_writer())
@@ -68,8 +66,15 @@ impl<'a> FlareSimulation<'a> {
         std::fs::create_dir(&path).expect("Failed to create dir");
 
         self.host(FLARE_SERVER, move || {
-            let path = path.clone();
-            async move { flare::launch(path).await.map_err(|e| e.into()) }
+            let base_url = dotenv::var("DATABASE_BASE").expect("DATABASE_BASE must be set");
+            let db_url = format!("{}/flare-db-test", base_url);
+
+            let mut config = FlareConfig::default();
+            config.store.storage.base_path = path.clone();
+            config.store.storage.database_url = db_url;
+            config.server.port = FLARE_PORT;
+
+            async move { flare::launch(config).await.map_err(|e| e.into()) }
         });
     }
 

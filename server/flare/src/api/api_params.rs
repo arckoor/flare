@@ -1,10 +1,14 @@
+use secstr::SecUtf8;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+use crate::crypto::deserialize_secutf8;
+
+#[derive(Deserialize)]
 #[cfg_attr(feature = "api-doc", derive(utoipa::ToSchema))]
 pub struct LoginInfo {
     pub username: String,
-    pub password: String, // TODO this could be a SecStr
+    #[serde(deserialize_with = "deserialize_secutf8")]
+    pub password: SecUtf8,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -2,5 +2,7 @@
 .vscode/
 target
 server/flare/src/prisma.rs
+server/storage
 openapi.json
+config.toml
 .env

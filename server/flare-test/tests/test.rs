@@ -1,5 +1,4 @@
-use flare::api::api_params::LoginInfo;
-use flare_sim::helpers::{get, login, logout, refresh, signup, Http};
+use flare_sim::helpers::{get, login, logout, refresh, signup, Http, LoginInfo};
 use flare_sim::sim::START_DELAY;
 use flare_sim::test_builder::flare_test;
 use flare_sim::turmoil;
@@ -27,8 +26,6 @@ fn test_signup() -> turmoil::Result {
                 .bearer_auth(token.access.clone())
                 .send()
                 .await
-                .unwrap()
-                .error_for_status()
                 .is_ok());
 
             let new_token = refresh(&client).await.unwrap();
@@ -38,16 +35,12 @@ fn test_signup() -> turmoil::Result {
                 .bearer_auth(token.access)
                 .send()
                 .await
-                .unwrap()
-                .error_for_status()
                 .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED)));
 
             assert!(get(&client, "/api/test-protected-route")
                 .bearer_auth(new_token.access.clone())
                 .send()
                 .await
-                .unwrap()
-                .error_for_status()
                 .is_ok());
 
             logout(&client, new_token.access.clone()).await.unwrap();
@@ -56,8 +49,6 @@ fn test_signup() -> turmoil::Result {
                 .bearer_auth(new_token.access)
                 .send()
                 .await
-                .unwrap()
-                .error_for_status()
                 .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED)));
 
             Ok(())

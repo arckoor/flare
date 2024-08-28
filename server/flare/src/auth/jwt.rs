@@ -39,10 +39,10 @@ struct JWTSettings {
 }
 
 impl JWTSettings {
-    pub fn new(secret: SecStr) -> Self {
+    pub fn new(secret: &SecStr) -> Self {
         let encoding_key = EncodingKey::from_secret(secret.unsecure());
         let decoding_key = DecodingKey::from_secret(secret.unsecure());
-        let algorithm = Algorithm::HS512;
+        let algorithm = Algorithm::HS512; // TODO maybe use asymmetric keys?
 
         Self {
             encoding_key,
@@ -53,6 +53,8 @@ impl JWTSettings {
 }
 
 pub struct Jwt {
+    #[allow(unused)]
+    domain: String,
     access: JWTSettings,
     refresh: JWTSettings,
     access_expiry: Duration,
@@ -63,10 +65,12 @@ pub struct Jwt {
 impl Jwt {
     const REFRESH_PREFIX: &'static str = "refresh";
     const ACCESS_PREFIX: &'static str = "access";
+    const REFRESH_TOKEN: &'static str = "refresh-token";
 
     pub fn new(
-        access_secret: SecStr,
-        refresh_secret: SecStr,
+        domain: String,
+        access_secret: &SecStr,
+        refresh_secret: &SecStr,
         db: Arc<Database>,
         access_expiry: Duration,
         refresh_expiry: Duration,
@@ -74,6 +78,7 @@ impl Jwt {
         let access = JWTSettings::new(access_secret);
         let refresh = JWTSettings::new(refresh_secret);
         Self {
+            domain,
             access,
             refresh,
             access_expiry,
@@ -146,7 +151,7 @@ impl Jwt {
     }
 
     pub async fn refresh(&self, jar: CookieJar) -> Result<(String, CookieJar), RestError> {
-        let refresh_token = match jar.get("refresh_token") {
+        let refresh_token = match jar.get(Jwt::REFRESH_TOKEN) {
             Some(token) => token.value(),
             None => return Err(RestError::unauthorized("No refresh token found")),
         };
@@ -213,8 +218,8 @@ impl Jwt {
     }
 
     fn add_cookie(&self, token: String, jar: CookieJar) -> CookieJar {
-        let builder = Cookie::build(("refresh_token", token))
-            .path("/api/") // todo
+        let builder = Cookie::build((Jwt::REFRESH_TOKEN, token))
+            .path("/api/")
             .http_only(true)
             .secure(true)
             .same_site(cookie::SameSite::Strict)
@@ -222,7 +227,7 @@ impl Jwt {
                 self.refresh_expiry.num_minutes(),
             ));
         #[cfg(not(feature = "sim"))]
-        let builder = builder.domain("localhost");
+        let builder = builder.domain(self.domain.clone());
         let cookie = builder.build();
 
         jar.add(cookie)
@@ -259,7 +264,7 @@ impl Jwt {
             .map_err(|_| RestError::internal("Failed to get redis connection"))?;
 
         let expiry = (Duration::milliseconds(expiry as i64) - Duration::milliseconds(nbf as i64)
-            + Duration::milliseconds(1000))
+            + Duration::milliseconds(10000))
         .num_seconds() as u64;
 
         con.set_ex(key, nbf, expiry)
