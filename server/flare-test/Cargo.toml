@@ -9,3 +9,4 @@ flare = { path = "../flare" }
 flare-sim = { path = "../flare-sim", features = ["sim"] }
 reqwest = { version = "0.12", features = ["json", "cookies"] }
 tokio = { version = "1", features = ["full"] }
+secstr = "0.5"

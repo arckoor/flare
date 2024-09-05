@@ -58,7 +58,7 @@ services:
 
 networks:
   flare-network:
-    driver: bridge
+    internal: true
 
 volumes:
   postgres-data:

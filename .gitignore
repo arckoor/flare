@@ -6,3 +6,4 @@ server/storage
 openapi.json
 config.toml
 .env
+certs/

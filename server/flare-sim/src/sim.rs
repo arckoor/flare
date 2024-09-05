@@ -13,7 +13,7 @@ use flare;
 
 pub const FLARE_SERVER: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
 pub const FLARE_PORT: u16 = 9000;
-pub const START_DELAY: Duration = Duration::from_secs(10);
+pub const START_DELAY: Duration = Duration::from_secs(30);
 
 pub struct FlareSimulation<'a> {
     pub working_dir: TempDir,
@@ -28,7 +28,7 @@ impl<'a> FlareSimulation<'a> {
         dotenv::dotenv().ok();
 
         let subscriber = tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .with(tracing_subscriber::fmt::layer())
             .with(
                 EnvFilter::builder()
                     .with_default_directive(LevelFilter::INFO.into())

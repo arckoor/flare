@@ -5,7 +5,7 @@ use oauth2::{
 };
 use secstr::SecUtf8;
 
-use crate::api::error::RestError;
+use crate::api::error::FoundError;
 
 use super::oauth::{OAuthClient, OAuthProvider};
 
@@ -17,10 +17,11 @@ pub struct IdentifyResponse {
 
 pub struct DiscordOAuth {
     client: OAuthClient,
+    login_url: String,
 }
 
 impl OAuthProvider for DiscordOAuth {
-    fn new(client_id: &SecUtf8, client_secret: &SecUtf8) -> Self {
+    fn new(client_id: &SecUtf8, client_secret: &SecUtf8, login_url: String) -> Self {
         let client = BasicClient::new(
             ClientId::new(client_id.unsecure().to_string()),
             Some(ClientSecret::new(client_secret.unsecure().to_string())),
@@ -35,7 +36,7 @@ impl OAuthProvider for DiscordOAuth {
             RevocationUrl::new("https://discord.com/api/oauth2/token/revoke".to_string()).unwrap(),
         );
 
-        Self { client }
+        Self { client, login_url }
     }
 
     fn auth_url(&self, csrf: CsrfToken, challenge: PkceCodeChallenge) -> Url {
@@ -49,29 +50,30 @@ impl OAuthProvider for DiscordOAuth {
         url
     }
 
-    async fn callback(&self, code: String, verifier: String) -> Result<(i64, String), RestError> {
+    async fn callback(&self, code: String, verifier: String) -> Result<(i64, String), FoundError> {
         let access = self
             .client
             .exchange_code(AuthorizationCode::new(code))
             .set_pkce_verifier(PkceCodeVerifier::new(verifier))
             .request_async(oauth2::reqwest::async_http_client)
             .await
-            .map_err(|_| RestError::internal("Failed to exchange code"))?;
+            .map_err(|_| FoundError::new(&self.login_url, "".to_string()))?;
 
+        // TODO error needs to include actual error type
         let response = reqwest::Client::new()
             .get("https://discord.com/api/users/@me")
             .bearer_auth(access.access_token().secret())
             .send()
             .await
-            .map_err(|_| RestError::internal("Failed to get user info"))?
+            .map_err(|_| FoundError::new(&self.login_url, "".to_string()))?
             .json::<IdentifyResponse>()
             .await
-            .map_err(|_| RestError::internal("Failed to parse user info"))?;
+            .map_err(|_| FoundError::new(&self.login_url, "".to_string()))?;
 
         // TODO fail gracefully, but log it!
         self.client
             .revoke_token(access.access_token().into())
-            .map_err(|_| RestError::internal("Failed to revoke token".to_string()))?;
+            .map_err(|_| FoundError::new(&self.login_url, "".to_string()))?;
 
         let id = response.id.parse().expect("User id is always a number");
         let username = response.username.clone();

@@ -1,0 +1,6 @@
+[test-groups]
+serial-integration = { max-threads = 1 }
+
+[[profile.default.overrides]]
+platform = 'cfg(unix)'
+test-group = 'serial-integration'

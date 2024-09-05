@@ -27,12 +27,15 @@ pub struct OAuthConfig {
     pub discord_client_id: SecUtf8,
     #[serde(deserialize_with = "deserialize_secutf8")]
     pub discord_client_secret: SecUtf8,
+    #[serde(deserialize_with = "deserialize_secstr")]
+    pub pkce_secret: SecStr,
+    pub login_url: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub port: u16,
-    pub url: String,
+    pub cert_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,11 +80,13 @@ impl Default for FlareConfig {
                 oauth: OAuthConfig {
                     discord_client_id: SecUtf8::from(""),
                     discord_client_secret: SecUtf8::from(""),
+                    pkce_secret: SecStr::from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+                    login_url: "/login".to_string(),
                 },
             },
             server: ServerConfig {
                 port: 8080,
-                url: "http://localhost".to_string(),
+                cert_path: PathBuf::from("./certs"),
             },
         }
     }

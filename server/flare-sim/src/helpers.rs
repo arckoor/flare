@@ -1,18 +1,20 @@
 use std::{net::IpAddr, sync::Arc};
 
-use flare::api::api_params::TokenResponse;
+use flare::api::api_params::{LoginInfo, TokenResponse};
 use reqwest::{Method, Response};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::sim::{FLARE_PORT, FLARE_SERVER};
 
 pub struct Http {
     pub client: reqwest::Client,
     pub cookie_store: Arc<reqwest_cookie_store::CookieStoreMutex>,
+    pub capture_bearer: bool,
+    pub bearer: Option<String>,
 }
 
 impl Http {
-    pub fn new_with_cookies() -> Self {
+    pub fn new_with_cookies(capture_bearer: bool) -> Self {
         let cookie_store = reqwest_cookie_store::CookieStore::default();
         let cookie_store = reqwest_cookie_store::CookieStoreMutex::new(cookie_store);
         let cookie_store = std::sync::Arc::new(cookie_store);
@@ -22,6 +24,24 @@ impl Http {
                 .build()
                 .unwrap(),
             cookie_store,
+            capture_bearer,
+            bearer: None,
+        }
+    }
+
+    pub fn capture_bearer(&mut self, res: &Result<TokenResponse, reqwest::Error>) {
+        if self.capture_bearer {
+            if let Ok(token) = res {
+                self.bearer = Some(token.access.clone());
+            }
+        }
+    }
+
+    pub fn clear_bearer(&mut self, res: &Result<Response, reqwest::Error>) {
+        if let Ok(res) = res {
+            if res.status().is_success() {
+                self.bearer = None;
+            }
         }
     }
 
@@ -32,7 +52,11 @@ impl Http {
     {
         let url = format!("http://[{}]:{}{}", host, port, path.into());
         let builder = self.client.request(method, &url);
-        RequestBuilder::new(builder)
+        let builder = RequestBuilder::new(builder);
+        if let Some(bearer) = &self.bearer {
+            return builder.bearer_auth(bearer.clone());
+        }
+        builder
     }
 
     #[must_use]
@@ -134,34 +158,37 @@ impl RequestBuilder {
     }
 }
 
-#[derive(Serialize)]
-pub struct LoginInfo {
-    pub username: String,
-    pub password: String,
-}
-
 pub async fn signup(client: &Http, login_info: &LoginInfo) -> Result<(), reqwest::Error> {
     post(client, "/api/signup").json(login_info).send().await?;
     Ok(())
 }
 
-pub async fn login(client: &Http, login_info: &LoginInfo) -> Result<TokenResponse, reqwest::Error> {
-    post(client, "/api/login")
+pub async fn login(
+    client: &mut Http,
+    login_info: &LoginInfo,
+) -> Result<TokenResponse, reqwest::Error> {
+    let res = post(client, "/api/login")
         .json(login_info)
         .send()
         .await?
         .json::<TokenResponse>()
-        .await
+        .await;
+    client.capture_bearer(&res);
+    res
 }
 
-pub async fn refresh(client: &Http) -> Result<TokenResponse, reqwest::Error> {
-    get(client, "/api/refresh")
+pub async fn refresh(client: &mut Http) -> Result<TokenResponse, reqwest::Error> {
+    let res = get(client, "/api/refresh")
         .send()
         .await?
         .json::<TokenResponse>()
-        .await
+        .await;
+    client.capture_bearer(&res);
+    res
 }
 
-pub async fn logout(client: &Http, token: String) -> Result<Response, reqwest::Error> {
-    get(client, "/api/logout").bearer_auth(token).send().await
+pub async fn logout(client: &mut Http, token: String) -> Result<Response, reqwest::Error> {
+    let res = get(client, "/api/logout").bearer_auth(token).send().await;
+    client.clear_bearer(&res);
+    res
 }

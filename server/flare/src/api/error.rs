@@ -1,12 +1,12 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use hyper::header;
 use prisma_client_rust::{
     prisma_errors::query_engine::{RecordNotFound, UniqueKeyViolation},
     QueryError,
 };
 
 /// An error for flare REST API.
-#[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
 pub struct RestError {
     msg: String,
@@ -97,5 +97,42 @@ impl From<QueryError> for RestError {
             }
             _ => RestError::internal("Error while processing request".to_string()),
         }
+    }
+}
+
+/// An error for flare API that redirects to a location.
+#[derive(Debug)]
+pub struct FoundError {
+    pub location: String,
+    pub msg: String,
+}
+
+// TODO maybe we should use query string instead of a message, and provide an error_code for the frontend to interpret and inform the user
+impl FoundError {
+    /// Creates a new flare API found error.
+    pub fn new(location: &str, msg: String) -> Self {
+        FoundError {
+            location: location.to_string(),
+            msg,
+        }
+    }
+}
+
+impl std::fmt::Display for FoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "-> {}, {}", self.location, self.msg)
+    }
+}
+
+impl std::error::Error for FoundError {}
+
+impl IntoResponse for FoundError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::FOUND,
+            [(header::LOCATION, self.location)],
+            self.msg,
+        )
+            .into_response()
     }
 }

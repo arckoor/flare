@@ -11,7 +11,8 @@ domain = "localhost"
 [backend.oauth]
 discord_client_id = "your_client_id"
 discord_client_secret = "your_client_secret"
+pkce_secret = "your_base64_encoded_32_byte_pkce_secret"
 
 [server]
 port = 8080
-url = "http://example.com"
+cert_path = ""

@@ -71,12 +71,13 @@ impl Jwt {
         domain: String,
         access_secret: &SecStr,
         refresh_secret: &SecStr,
-        db: Arc<Database>,
         access_expiry: Duration,
         refresh_expiry: Duration,
+        db: Arc<Database>,
     ) -> Self {
         let access = JWTSettings::new(access_secret);
         let refresh = JWTSettings::new(refresh_secret);
+
         Self {
             domain,
             access,
@@ -184,9 +185,9 @@ impl Jwt {
         let (now, access_expiry) = self.generate_time(self.access_expiry);
         let (_, refresh_expiry) = self.generate_time(self.refresh_expiry);
 
-        self.set_nbf(Jwt::ACCESS_PREFIX, id, access_expiry, now)
+        self.set_nbf(Jwt::ACCESS_PREFIX, id, access_expiry, now + 60)
             .await?;
-        self.set_nbf(Jwt::REFRESH_PREFIX, id, refresh_expiry, now)
+        self.set_nbf(Jwt::REFRESH_PREFIX, id, refresh_expiry, now + 60)
             .await?;
 
         Ok(())
@@ -212,8 +213,8 @@ impl Jwt {
 
     fn generate_time(&self, exp: TimeDelta) -> (usize, usize) {
         let now = chrono::Utc::now();
-        let expiration = (now + exp).timestamp_millis() as usize;
-        let now = now.timestamp_millis() as usize;
+        let expiration = (now + exp).timestamp() as usize;
+        let now = now.timestamp() as usize;
         (now, expiration)
     }
 
@@ -263,8 +264,8 @@ impl Jwt {
             .await
             .map_err(|_| RestError::internal("Failed to get redis connection"))?;
 
-        let expiry = (Duration::milliseconds(expiry as i64) - Duration::milliseconds(nbf as i64)
-            + Duration::milliseconds(10000))
+        let expiry = (Duration::seconds(expiry as i64) - Duration::seconds(nbf as i64)
+            + Duration::seconds(10))
         .num_seconds() as u64;
 
         con.set_ex(key, nbf, expiry)
@@ -276,8 +277,8 @@ impl Jwt {
     async fn check_expiry(&self, prefix: &str, id: i32, iat: usize) -> Result<(), RestError> {
         let expiry = self.get_nbf(prefix, id).await?;
         if let Some(expiry) = expiry {
-            let expiry = Duration::milliseconds(expiry as i64);
-            let iat = Duration::milliseconds(iat as i64);
+            let expiry = Duration::seconds(expiry as i64);
+            let iat = Duration::seconds(iat as i64);
             if expiry > iat {
                 return Err(RestError::unauthorized("Token has been revoked"));
             }

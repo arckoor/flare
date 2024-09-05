@@ -1,6 +1,7 @@
 use crate::{
     api::{api_params::LoginInfo, error::RestError},
     config::StoreConfig,
+    crypto::hash_password,
     prisma::{credential_user, discord_user, user, Permissions, PrismaClient},
 };
 
@@ -65,6 +66,7 @@ impl Database {
         self.prisma
             ._transaction()
             .run(|client| async move {
+                let password = hash_password(&login_info.password)?;
                 let user = client
                     .user()
                     .create(
@@ -78,7 +80,7 @@ impl Database {
                     .create(
                         user::id::equals(user.id),
                         login_info.username.clone(),
-                        login_info.password.unsecure().to_string(),
+                        String::from_utf8_lossy(password.unsecure()).to_string(),
                         vec![],
                     )
                     .exec()
