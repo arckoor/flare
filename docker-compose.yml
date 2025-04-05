@@ -6,8 +6,11 @@ services:
     restart: unless-stopped
     ports:
       - 8080:8080
-    environment:
-      - DATABASE_URL=postgres://flare:${PG_PASSWORD}@db:5432/flare-db
+    volumes:
+      - ./config.toml:/app/config.toml
+      - flare-data:/app/storage
+    networks:
+      - flare-network
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,25 +38,24 @@ services:
     networks:
       - flare-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready"]
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}" ]
       interval: 10s
       timeout: 5s
       retries: 5
   redis:
-    image: redis:7-alpine
+    image: redis:7.2.4-alpine
     container_name: flare-redis
     restart: unless-stopped
     networks:
       - flare-network
     volumes:
-      - ./redis.conf:/usr/local/etc/redis/redis.conf
       - redis-data:/data
     healthcheck:
       test: redis-cli ping | grep PONG
       interval: 10s
       timeout: 5s
       retries: 5
-    command: redis-server /usr/local/etc/redis/redis.conf
+    command: redis-server --appendonly yes
 
 
 networks:

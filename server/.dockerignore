@@ -1,11 +1,10 @@
 *
 !.cargo/*
-!prisma/*
-!prisma-cli/*
 !flare
 !flare-sim
 !flare-test
-flare/src/prisma.rs
+!sea-entity
+!sea-migration
 !Cargo.lock
 !Cargo.toml
 !openapi.sh

@@ -1,14 +1,14 @@
-FROM rust:1.80.1 AS builder
+FROM rust:latest AS builder
 
 WORKDIR /app
 
 COPY . .
 
-RUN cargo prisma generate
-
 RUN cargo build --bin flare --release
 
-FROM debian:stable-slim
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y libssl3 && apt clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

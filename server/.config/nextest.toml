@@ -2,5 +2,5 @@
 serial-integration = { max-threads = 1 }
 
 [[profile.default.overrides]]
-platform = 'cfg(unix)'
+filter = "package(flare-test)"
 test-group = 'serial-integration'

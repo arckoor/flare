@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    auth::{discord_oauth::DiscordOAuth, jwt::Jwt, oauth::OAuth},
+    auth::{jwt::Jwt, oauth::Providers},
     config::StoreConfig,
     db::Database,
 };
@@ -12,7 +12,7 @@ pub struct Store {
     pub image_path: PathBuf,
     pub db: Arc<Database>,
     pub jwt: Jwt,
-    pub d_oauth: OAuth<DiscordOAuth>,
+    pub oauth: Providers,
 }
 
 impl Store {
@@ -20,33 +20,15 @@ impl Store {
         let base_path = PathBuf::from(&config.storage.base_path);
         let image_path = base_path.join(IMAGE_PATH);
 
-        for path in [&base_path, &image_path].iter() {
+        for path in [&base_path, &image_path].into_iter() {
             if !path.exists() {
                 std::fs::create_dir_all(path).expect("Failed to create storage directory");
             }
         }
 
-        let db = Arc::new(Database::new(&config).await);
-
-        let refresh_expiry = chrono::Duration::days(30); // TODO config
-        let access_expiry = chrono::Duration::hours(1);
-
-        let jwt = Jwt::new(
-            config.jwt.domain.clone(),
-            &config.jwt.access_secret,
-            &config.jwt.refresh_secret,
-            access_expiry,
-            refresh_expiry,
-            db.clone(),
-        );
-
-        let d_oauth = OAuth::new(
-            &config.oauth.discord_client_id,
-            &config.oauth.discord_client_secret,
-            &config.oauth.pkce_secret,
-            &config.oauth.login_url,
-            db.clone(),
-        );
+        let db = Arc::new(Database::new(&config.storage).await);
+        let jwt = Jwt::new(&config.jwt, db.clone());
+        let providers = Providers::new(&config.oauth, db.clone());
 
         drop(config);
 
@@ -54,7 +36,36 @@ impl Store {
             image_path,
             db,
             jwt,
-            d_oauth,
+            oauth: providers,
         }
     }
 }
+
+/*
+TODO tasks
+probably a task runner that lives in the Store
+also set_missed_tick_behavior(Delay / Skip, depending on jitter)
+
+tokio::spawn(async move {
+    let mut interval = time::interval_at(
+        time::Instant::now() + INTERVAL,
+        INTERVAL,
+    );
+    loop {
+        interval.tick().await;
+
+        tokio::spawn(async move {
+            task_to_run().await;
+        });
+
+    }
+});
+
+the following tasks should run every n minutes or so, perhaps with a bit of jitter so that they don't all run at the same time
+Tasks:
+- clean up old (> 1 week) group invites
+- clean up old images that have not been assigned to a poll (db entry & file)
+- lock old polls, so that they can't be edited anymore
+- clean up votes to locked polls (set ephemeral_user_vote relation to NULL)
+- clean up ephemeral users that don't have any votes left, and have not been seen in the last week or so (this is a potential race condition :c)
+*/

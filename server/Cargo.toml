@@ -1,10 +1,11 @@
 
 [workspace]
 members = [
-  "prisma-cli",
   "flare",
   "flare-sim",
   "flare-test",
+  "sea-entity",
+  "sea-migration",
 ]
-resolver = "2"
+resolver = "3"
 

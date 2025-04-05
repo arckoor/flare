@@ -1,18 +1,33 @@
-[backend.storage]
-base_path = ""
-database_url = "postgres://localhost:5432/flare-db"
+[store.storage]
+base_path = "./storage"
+database_url = "postgres://flare:12345@localhost:5432/flare-db"
 redis_url = "redis://localhost:6379"
 
-[backend.jwt]
-access_secret = "your_access_secret"
-refresh_secret = "your_refresh_secret"
+[store.storage.admin]
+discord_id = "your_discord_id_if_any"
+github_id = "your_github_id_if_any"
+
+[store.jwt]
+access_expiry = "1h"
+refresh_expiry = "1d"
+access_secret = "64_byte_hex_secret"
+refresh_secret = "64_byte_hex_secret"
 domain = "localhost"
 
-[backend.oauth]
-discord_client_id = "your_client_id"
-discord_client_secret = "your_client_secret"
-pkce_secret = "your_base64_encoded_32_byte_pkce_secret"
+[store.oauth]
+pkce_secret = "32_byte_hex_secret"
+login_url = ""
+api_base = "https://localhost/api"
+user_agent = ""
+
+[store.oauth.discord]
+client_id = ""
+client_secret = ""
+
+[store.oauth.github]
+client_id = ""
+client_secret = ""
 
 [server]
 port = 8080
-cert_path = ""
+cert_path = "../certs"

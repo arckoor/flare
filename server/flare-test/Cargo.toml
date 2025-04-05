@@ -1,12 +1,11 @@
 [package]
 name = "flare-test"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dev-dependencies]
-serde_json = "1.0"
 flare = { path = "../flare" }
 flare-sim = { path = "../flare-sim", features = ["sim"] }
-reqwest = { version = "0.12", features = ["json", "cookies"] }
-tokio = { version = "1", features = ["full"] }
-secstr = "0.5"
+reqwest = { version = "0.12.15", features = ["json", "cookies", "multipart"] }
+sea-entity = { path = "../sea-entity" }
+tokio = { version = "1.44.1", features = ["full"] }

@@ -1,159 +1,193 @@
+use sea_migration::{Migrator, MigratorTrait};
+use sea_orm::{
+    ActiveModelTrait, DatabaseConnection, Iterable, Set, TransactionTrait, entity::prelude::*,
+};
+
 use crate::{
-    api::{api_params::LoginInfo, error::RestError},
-    config::StoreConfig,
-    crypto::hash_password,
-    prisma::{credential_user, discord_user, user, Permissions, PrismaClient},
+    api::error::RestError,
+    config::{AdminConfig, StorageConfig},
+    transaction,
 };
 
 pub struct Database {
-    pub prisma: PrismaClient,
-    pub redis: redis::Client,
+    pub sea: DatabaseConnection,
+    pub redis: redis::aio::MultiplexedConnection,
 }
 
 impl Database {
-    pub async fn new(config: &StoreConfig) -> Self {
-        std::env::set_var("DATABASE_URL", &config.storage.database_url);
-
-        let prisma = PrismaClient::_builder()
-            .build()
+    pub async fn new(config: &StorageConfig) -> Self {
+        let sea = sea_orm::Database::connect(&config.database_url)
             .await
-            .expect("Failed to create Prisma client");
+            .expect("Failed to create SeaORM connection");
 
-        #[cfg(all(not(debug_assertions), not(feature = "sim")))]
-        prisma
-            ._migrate_deploy()
+        let redis = redis::Client::open(config.redis_url.clone())
+            .expect("Failed to create Redis client")
+            .get_multiplexed_async_connection()
             .await
-            .expect("Failed to migrate database");
+            .expect("Failed to get Redis connection");
 
-        #[cfg(debug_assertions)]
-        {
-            #[cfg(feature = "sim")]
-            prisma
-                ._db_push()
-                .accept_data_loss()
-                .force_reset()
-                .await
-                .expect("Failed to push database");
-            #[cfg(not(feature = "sim"))]
-            prisma
-                ._db_push()
-                .accept_data_loss()
-                .await
-                .expect("Failed to push database");
-        }
-
-        let redis = redis::Client::open(config.storage.redis_url.clone())
-            .expect("Failed to create Redis client");
+        // in sim runs, we completely flush everything
         #[cfg(feature = "sim")]
         {
-            let mut con = redis
-                .get_multiplexed_async_connection()
+            Migrator::reset(&sea)
                 .await
-                .expect("Failed to get Redis connection");
+                .expect("Failed to reset database");
+
             redis::cmd("FLUSHDB")
-                .exec_async(&mut con)
+                .exec_async(&mut redis.clone())
                 .await
                 .expect("Failed to flush Redis database");
         }
 
-        Self { prisma, redis }
-    }
-
-    pub async fn create_credentials_user(
-        &self,
-        login_info: LoginInfo,
-    ) -> Result<user::Data, RestError> {
-        self.prisma
-            ._transaction()
-            .run(|client| async move {
-                let password = hash_password(&login_info.password)?;
-                let user = client
-                    .user()
-                    .create(
-                        login_info.username.clone(),
-                        vec![user::permissions::set(vec![Permissions::CreatePolls])],
-                    )
-                    .exec()
-                    .await?;
-                client
-                    .credential_user()
-                    .create(
-                        user::id::equals(user.id),
-                        login_info.username.clone(),
-                        String::from_utf8_lossy(password.unsecure()).to_string(),
-                        vec![],
-                    )
-                    .exec()
-                    .await?;
-
-                Ok::<_, RestError>(user)
-            })
+        Migrator::up(&sea, None)
             .await
+            .expect("Failed to migrate database");
+
+        Database::init_admin(config.admin.clone(), &sea).await;
+
+        // TODO why are we storing the redis client, and not the connection
+        Self { sea, redis }
     }
 
-    pub async fn get_user(&self, id: i32) -> Result<Option<user::Data>, RestError> {
-        Ok(self
-            .prisma
-            .user()
-            .find_unique(user::id::equals(id))
-            .exec()
-            .await?)
-    }
-
-    pub async fn get_credential_user(
+    pub async fn get_or_create_or_link_oauth_user(
         &self,
-        username: String,
-    ) -> Result<Option<credential_user::Data>, RestError> {
-        let u = self
-            .prisma
-            .credential_user()
-            .find_unique(credential_user::username::equals(username))
-            .with(credential_user::user::fetch())
-            .exec()
+        oauth_id: String,
+        provider: sea_entity::sea_orm_active_enums::OauthProvider,
+        existing_user: Option<String>,
+    ) -> Result<sea_entity::user::Model, RestError> {
+        let oauth_user = sea_entity::o_auth_user::Entity::find()
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sea_entity::o_auth_user::Column::Provider.eq(provider))
+                    .add(sea_entity::o_auth_user::Column::ProviderUserId.eq(oauth_id.clone())),
+            )
+            .find_also_related(sea_entity::user::Entity)
+            .one(&self.sea)
             .await?;
-        Ok(u)
-    }
 
-    pub async fn get_or_create_discord_user(
-        &self,
-        discord_id: i64,
-        discord_username: String,
-    ) -> Result<Box<user::Data>, RestError> {
-        let user = self
-            .prisma
-            .discord_user()
-            .find_unique(discord_user::discord_id::equals(discord_id))
-            .with(discord_user::user::fetch())
-            .exec()
-            .await?;
-        let user = match user {
-            Some(user) => user
-                .user
-                .expect("Every discord user must be related to a user"),
-            None => {
-                self.prisma
-                    ._transaction()
-                    .run(|client| async move {
-                        let user = client
-                            .user()
-                            .create(
-                                discord_username,
-                                vec![user::permissions::set(vec![Permissions::CreatePolls])],
-                            )
-                            .exec()
-                            .await?;
+        // TODO test this logic, am not sure about it just yet
+        match oauth_user {
+            Some((_, Some(user))) => {
+                if let Some(existing_user) = existing_user {
+                    if user.id != existing_user {
+                        return Err(RestError::forbidden(
+                            "This account is already linked to a user".to_string(),
+                        ));
+                    }
+                }
 
-                        client
-                            .discord_user()
-                            .create(user::id::equals(user.id), discord_id, vec![])
-                            .exec()
-                            .await?;
-
-                        Ok::<_, RestError>(Box::new(user))
-                    })
-                    .await?
+                Ok(user)
             }
-        };
-        Ok(user)
+            None => {
+                let user = transaction!(&self.sea, txn, {
+                    let user = if let Some(user_id) = existing_user {
+                        sea_entity::user::Entity::find_by_id(user_id)
+                            .one(txn)
+                            .await?
+                            .ok_or_else(|| RestError::not_found("User not found"))?
+                    } else {
+                        sea_entity::user::ActiveModel {
+                            id: Set(cuid2::create_id()),
+                            permissions: Set(vec![]),
+                            ..Default::default()
+                        }
+                        .insert(txn)
+                        .await?
+                    };
+
+                    sea_entity::o_auth_user::ActiveModel {
+                        provider: Set(provider),
+                        provider_user_id: Set(oauth_id),
+                        user_id: Set(user.id.clone()),
+                        ..Default::default()
+                    }
+                    .insert(txn)
+                    .await?;
+
+                    Ok(user)
+                })?;
+
+                Ok(user)
+            }
+            Some((_, None)) => unreachable!(),
+        }
+    }
+
+    pub fn filter_polls(
+        &self,
+        user_id: &str,
+        groups: Vec<String>,
+        group_id: Option<String>,
+    ) -> sea_orm::Condition {
+        sea_orm::Condition::any()
+            .add(sea_entity::poll::Column::OwnerId.eq(user_id))
+            .add(sea_entity::poll::Column::GroupId.is_in(groups))
+            .add_option(group_id.map(|id| sea_entity::poll::Column::GroupId.eq(id)))
+    }
+
+    pub fn filter_poll_by_id(
+        &self,
+        poll_id: &str,
+        user_id: &str,
+        groups: Vec<String>,
+    ) -> sea_orm::Condition {
+        sea_orm::Condition::all()
+            .add(sea_entity::poll::Column::Id.eq(poll_id))
+            .add(self.filter_polls(user_id, groups, None))
+    }
+
+    async fn init_admin(config: AdminConfig, sea: &DatabaseConnection) {
+        if sea_entity::user::Entity::find().count(sea).await.unwrap() > 0 {
+            return;
+        }
+        transaction!(sea, txn, {
+            let admin_id = if cfg!(feature = "sim") {
+                config.discord_id.clone().unwrap()
+            } else {
+                cuid2::create_id()
+            };
+
+            let admin = sea_entity::user::ActiveModel {
+                id: Set(admin_id),
+                permissions: Set(sea_entity::sea_orm_active_enums::Permissions::iter().collect()),
+                ..Default::default()
+            }
+            .insert(txn)
+            .await?;
+
+            for (id, provider) in [
+                (
+                    config.discord_id,
+                    sea_entity::sea_orm_active_enums::OauthProvider::Discord,
+                ),
+                (
+                    config.github_id,
+                    sea_entity::sea_orm_active_enums::OauthProvider::Github,
+                ),
+            ] {
+                if let Some(id) = id {
+                    sea_entity::o_auth_user::ActiveModel {
+                        provider: Set(provider),
+                        provider_user_id: Set(id.clone()),
+                        user_id: Set(admin.id.clone()),
+                        ..Default::default()
+                    }
+                    .insert(txn)
+                    .await?;
+                }
+            }
+
+            if sea_entity::o_auth_user::Entity::find()
+                .filter(sea_entity::o_auth_user::Column::UserId.eq(admin.id.clone()))
+                .count(txn)
+                .await?
+                == 0
+            {
+                panic!("You must configure at least on login method for the admin user");
+            }
+
+            Ok(())
+        })
+        .expect("Failed to init admin");
     }
 }

@@ -1,38 +1,54 @@
 use std::{net::IpAddr, sync::Arc};
 
-use flare::api::api_params::{LoginInfo, TokenResponse};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use reqwest::{Method, Response};
+use sea_entity::sea_orm_active_enums::Permissions;
 use serde::Deserialize;
+use tracing::info;
 
 use crate::sim::{FLARE_PORT, FLARE_SERVER};
+use flare::{
+    api::api_params::{
+        AddGroup, AddPoll, AddedPoll, EditGroup, EditPoll, FetchPoll, FetchPolls, FetchResults,
+        FetchVote, FetchVoteResults, FetchVotingPoll, Group, LoginInfo, Paginator, PublishResults,
+        TokenResponse, UploadedImage, Vote,
+    },
+    auth::jwt::AccessClaims,
+};
 
 pub struct Http {
     pub client: reqwest::Client,
     pub cookie_store: Arc<reqwest_cookie_store::CookieStoreMutex>,
     pub capture_bearer: bool,
     pub bearer: Option<String>,
+    pub ip: Option<String>,
 }
 
 impl Http {
-    pub fn new_with_cookies(capture_bearer: bool) -> Self {
-        let cookie_store = reqwest_cookie_store::CookieStore::default();
-        let cookie_store = reqwest_cookie_store::CookieStoreMutex::new(cookie_store);
-        let cookie_store = std::sync::Arc::new(cookie_store);
+    pub fn new_with_cookies(capture_bearer: bool, ip: Option<String>) -> Self {
+        let cookie_store = {
+            let c = reqwest_cookie_store::CookieStore::default();
+            let c = reqwest_cookie_store::CookieStoreMutex::new(c);
+            Arc::new(c)
+        };
+
         Self {
             client: reqwest::Client::builder()
                 .cookie_provider(cookie_store.clone())
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
             cookie_store,
             capture_bearer,
             bearer: None,
+            ip,
         }
     }
 
     pub fn capture_bearer(&mut self, res: &Result<TokenResponse, reqwest::Error>) {
         if self.capture_bearer {
             if let Ok(token) = res {
-                self.bearer = Some(token.access.clone());
+                self.bearer = Some(token.access.unsecure().to_string());
             }
         }
     }
@@ -45,6 +61,28 @@ impl Http {
         }
     }
 
+    pub fn get_groups(&self) -> Vec<String> {
+        self.bearer
+            .as_ref()
+            .map_or_else(Vec::new, |bearer| self.decode_claims(bearer).groups)
+    }
+
+    pub fn get_permissions(&self) -> Vec<Permissions> {
+        self.bearer
+            .as_ref()
+            .map_or_else(Vec::new, |bearer| self.decode_claims(bearer).permissions)
+    }
+
+    fn decode_claims(&self, bearer: &str) -> AccessClaims {
+        let key = DecodingKey::from_secret(&[]);
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.insecure_disable_signature_validation();
+
+        jsonwebtoken::decode::<AccessClaims>(&bearer, &key, &validation)
+            .unwrap()
+            .claims
+    }
+
     #[must_use]
     pub fn request<S>(&self, host: IpAddr, port: u16, method: Method, path: S) -> RequestBuilder
     where
@@ -52,9 +90,12 @@ impl Http {
     {
         let url = format!("http://[{}]:{}{}", host, port, path.into());
         let builder = self.client.request(method, &url);
-        let builder = RequestBuilder::new(builder);
+        let mut builder = RequestBuilder::new(builder);
         if let Some(bearer) = &self.bearer {
-            return builder.bearer_auth(bearer.clone());
+            builder = builder.bearer_auth(bearer.clone());
+        }
+        if let Some(ip) = &self.ip {
+            builder = builder.header("X-Forwarded-For", ip);
         }
         builder
     }
@@ -153,13 +194,111 @@ impl RequestBuilder {
         }
     }
 
+    pub fn multipart(self, form: reqwest::multipart::Form) -> Self {
+        Self {
+            builder: self.builder.multipart(form),
+        }
+    }
+
+    pub fn query(self, query: &impl serde::Serialize) -> Self {
+        Self {
+            builder: self.builder.query(query),
+        }
+    }
+
+    pub fn header(self, key: &str, value: &str) -> Self {
+        Self {
+            builder: self.builder.header(key, value),
+        }
+    }
+
     pub async fn send(self) -> Result<Response, reqwest::Error> {
         self.builder.send().await?.error_for_status()
     }
 }
 
-pub async fn signup(client: &Http, login_info: &LoginInfo) -> Result<(), reqwest::Error> {
-    post(client, "/api/signup").json(login_info).send().await?;
+pub fn logins() -> [LoginInfo; 4] {
+    [
+        LoginInfo {
+            id: "admin".to_string(),
+        },
+        LoginInfo {
+            id: "foo".to_string(),
+        },
+        LoginInfo {
+            id: "bar".to_string(),
+        },
+        LoginInfo {
+            id: "baz".to_string(),
+        },
+    ]
+}
+
+pub fn png_images() -> [&'static [u8]; 10] {
+    [
+        include_bytes!("../../flare-test/images/0.png"),
+        include_bytes!("../../flare-test/images/1.png"),
+        include_bytes!("../../flare-test/images/2.png"),
+        include_bytes!("../../flare-test/images/3.png"),
+        include_bytes!("../../flare-test/images/4.png"),
+        include_bytes!("../../flare-test/images/5.png"),
+        include_bytes!("../../flare-test/images/6.png"),
+        include_bytes!("../../flare-test/images/7.png"),
+        include_bytes!("../../flare-test/images/8.png"),
+        include_bytes!("../../flare-test/images/9.png"),
+    ]
+}
+
+pub fn jpg_images() -> [&'static [u8]; 4] {
+    [
+        include_bytes!("../../flare-test/images/10.jpg"),
+        include_bytes!("../../flare-test/images/11.jpg"),
+        include_bytes!("../../flare-test/images/12.jpg"),
+        include_bytes!("../../flare-test/images/13.jpg"),
+    ]
+}
+
+pub async fn get_client(user: usize, with_ip: bool) -> Result<(Http, String), reqwest::Error> {
+    let login_info = &logins()[user];
+
+    let mut client = Http::new_with_cookies(
+        true,
+        if with_ip {
+            Some(login_info.id.clone())
+        } else {
+            None
+        },
+    );
+
+    let _ = login(&mut client, &login_info).await?;
+    Ok((client, login_info.id.clone()))
+}
+
+pub async fn get_default_client() -> Result<Http, reqwest::Error> {
+    Ok(get_client(0, true).await?.0)
+}
+
+pub async fn wait_for_api(client: &Http) {
+    let mut i = 0;
+    loop {
+        let res = get(client, "/api/ping").send().await;
+        if let Ok(res) = &res {
+            if res.status().is_success() {
+                break;
+            }
+        }
+        i += 1;
+        if i > 400 {
+            tracing::error!("API did not respond: {:?}", res);
+            panic!("API did not start");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    info!("API is up after {} checks", i);
+}
+
+pub async fn auth_ping(client: &Http) -> Result<(), reqwest::Error> {
+    let _ = get(client, "/api/auth-ping").send().await?;
     Ok(())
 }
 
@@ -178,17 +317,228 @@ pub async fn login(
 }
 
 pub async fn refresh(client: &mut Http) -> Result<TokenResponse, reqwest::Error> {
-    let res = get(client, "/api/refresh")
-        .send()
-        .await?
-        .json::<TokenResponse>()
-        .await;
+    let res = req(client, "/api/refresh").await;
     client.capture_bearer(&res);
     res
 }
 
-pub async fn logout(client: &mut Http, token: String) -> Result<Response, reqwest::Error> {
-    let res = get(client, "/api/logout").bearer_auth(token).send().await;
+/// This function assumes a client with a captured bearer token
+pub async fn logout(client: &mut Http) -> Result<(), reqwest::Error> {
+    let res = get(client, "/api/logout").send().await;
     client.clear_bearer(&res);
-    res
+    Ok(())
+}
+
+pub async fn fetch_image(client: &Http, name: &str) -> Result<Vec<u8>, reqwest::Error> {
+    get(client, &format!("/api/image/{}", name))
+        .send()
+        .await?
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+}
+
+pub async fn add_image(
+    client: &Http,
+    image: Vec<u8>,
+    mime: &str,
+) -> Result<UploadedImage, reqwest::Error> {
+    let part = reqwest::multipart::Part::bytes(image)
+        .file_name("image.png")
+        .mime_str(mime)
+        .unwrap();
+
+    let form = reqwest::multipart::Form::new().part("image", part);
+
+    post(&client, "/api/image")
+        .multipart(form)
+        .send()
+        .await?
+        .json::<UploadedImage>()
+        .await
+}
+
+pub async fn remove_image(client: &Http, name: &str) -> Result<(), reqwest::Error> {
+    delete(client, &format!("/api/image/{}", name))
+        .send()
+        .await?;
+    Ok(())
+}
+
+pub async fn fetch_poll(client: &Http, poll_id: &str) -> Result<FetchPoll, reqwest::Error> {
+    req(client, &format!("/api/poll/{}", poll_id)).await
+}
+
+pub async fn fetch_polls(
+    client: &Http,
+    paginator: Option<Paginator>,
+) -> Result<FetchPolls, reqwest::Error> {
+    let mut res = get(client, "/api/polls");
+    if let Some(paginator) = paginator {
+        res = res.query(&paginator);
+    }
+    res.send().await?.json::<FetchPolls>().await
+}
+
+pub async fn add_poll(client: &Http, add_poll: AddPoll) -> Result<AddedPoll, reqwest::Error> {
+    post(client, "/api/poll")
+        .json(&add_poll)
+        .send()
+        .await?
+        .json::<AddedPoll>()
+        .await
+}
+
+pub async fn edit_poll(
+    client: &Http,
+    poll_id: &str,
+    edit_poll: EditPoll,
+) -> Result<(), reqwest::Error> {
+    patch(client, &format!("/api/poll/{}", poll_id))
+        .json(&edit_poll)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn remove_poll(client: &Http, poll_id: &str) -> Result<(), reqwest::Error> {
+    delete(client, &format!("/api/poll/{}", poll_id))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn fetch_results(client: &Http, poll_id: &str) -> Result<FetchResults, reqwest::Error> {
+    req(client, &format!("/api/poll/{}/results", poll_id)).await
+}
+
+pub async fn publish_results(
+    client: &Http,
+    poll_id: &str,
+    publish_results: PublishResults,
+) -> Result<(), reqwest::Error> {
+    post(client, &format!("/api/poll/{}/results", poll_id))
+        .json(&publish_results)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn join_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {
+    post(client, &format!("/api/group/{}", group_id))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn leave_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {
+    delete(client, &format!("/api/group/{}", group_id))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn add_group(client: &Http, add_group: AddGroup) -> Result<Group, reqwest::Error> {
+    post(client, "/api/groups")
+        .json(&add_group)
+        .send()
+        .await?
+        .json::<Group>()
+        .await
+}
+
+pub async fn fetch_group(client: &Http, group_id: &str) -> Result<Group, reqwest::Error> {
+    req(client, &format!("/api/groups/{}", group_id)).await
+}
+
+pub async fn edit_group(
+    client: &Http,
+    group_id: &str,
+    edit_group: EditGroup,
+) -> Result<(), reqwest::Error> {
+    patch(client, &format!("/api/groups/{}", group_id))
+        .json(&edit_group)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn remove_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {
+    delete(client, &format!("/api/groups/{}", group_id))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn add_group_user(
+    client: &Http,
+    group_id: &str,
+    user_id: &str,
+) -> Result<(), reqwest::Error> {
+    post(
+        client,
+        &format!("/api/groups/{}/user/{}", group_id, user_id),
+    )
+    .send()
+    .await?;
+
+    Ok(())
+}
+
+pub async fn remove_group_user(
+    client: &Http,
+    group_id: &str,
+    user_id: &str,
+) -> Result<(), reqwest::Error> {
+    delete(
+        client,
+        &format!("/api/groups/{}/user/{}", group_id, user_id),
+    )
+    .send()
+    .await?;
+
+    Ok(())
+}
+
+pub async fn fetch_voting_image(client: &Http, image_id: &str) -> Result<Vec<u8>, reqwest::Error> {
+    get(client, &format!("/api/v/image/{}", image_id))
+        .send()
+        .await?
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+}
+
+pub async fn fetch_voting_poll(
+    client: &Http,
+    poll_id: &str,
+) -> Result<FetchVotingPoll, reqwest::Error> {
+    req(client, &format!("/api/v/poll/{}", poll_id)).await
+}
+
+pub async fn fetch_vote(client: &Http, poll_id: &str) -> Result<FetchVote, reqwest::Error> {
+    req(client, &format!("/api/v/poll/{}/vote", poll_id)).await
+}
+
+pub async fn vote(client: &Http, poll_id: &str, vote: Vote) -> Result<(), reqwest::Error> {
+    post(client, &format!("/api/v/poll/{}/vote", poll_id))
+        .json(&vote)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn fetch_voting_results(
+    client: &Http,
+    poll_id: &str,
+) -> Result<FetchVoteResults, reqwest::Error> {
+    req(client, &format!("/api/v/poll/{}/results", poll_id)).await
 }
