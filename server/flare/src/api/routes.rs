@@ -15,13 +15,14 @@ use axum_extra::{
     headers::{Authorization, authorization::Bearer},
 };
 use hyper::{StatusCode, header};
+use rand::{rng, seq::SliceRandom};
 use sea_entity::sea_orm_active_enums::Permissions;
 use sea_orm::{IntoActiveModel, QueryOrder, Set, TransactionTrait, entity::prelude::*};
 use sea_orm::{Iterable, QuerySelect};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::{requires, store::Store, transaction, util::now, validate_text};
+use crate::{requires, store::Store, transaction, validate_text};
 
 use super::api_params::{
     AddGroup, AddImage, AddPoll, AddedPoll, EditGroup, EditPoll, FetchPoll, FetchPolls,
@@ -294,8 +295,6 @@ async fn add_image(
         return Err(RestError::bad_req("No file provided"));
     };
 
-    // TODO does this really need an entire crate
-    // we could just accept image/png and image/jpeg
     let content_type: mime::Mime = field
         .content_type()
         .ok_or(RestError::bad_req("No content type"))?
@@ -555,6 +554,7 @@ pub async fn fetch_poll(
         .count(&store.db.sea)
         .await?;
 
+    // TODO we store the image aspect ratio, but it's not used here?
     Ok(Json(FetchPoll {
         id: poll.id,
         title: poll.title,
@@ -789,7 +789,7 @@ pub async fn fetch_results(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = now()?.as_secs_f64();
+    let now = Store::now()?.as_secs_f64();
 
     let images = sea_entity::image::Entity::find()
         .filter(sea_entity::image::Column::PollId.eq(&id))
@@ -839,7 +839,7 @@ pub async fn publish_results(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = now()?.as_secs_f64();
+    let now = Store::now()?.as_secs_f64();
 
     if poll.ends > now {
         return Err(RestError::bad_req("Poll is still active"));
@@ -1366,7 +1366,7 @@ pub async fn vote(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = now()?.as_secs_f64();
+    let now = Store::now()?.as_secs_f64();
 
     if poll.ends < now {
         return Err(RestError::bad_req("Poll has ended"));
@@ -1445,7 +1445,7 @@ pub async fn fetch_voting_results(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = now()?.as_secs_f64();
+    let now = Store::now()?.as_secs_f64();
 
     if poll.ends > now {
         return Err(RestError::bad_req("Poll is still active"));
@@ -1474,23 +1474,23 @@ pub async fn fetch_voting_results(
         vote_counts.entry(vote.image_id).and_modify(|x| *x += 1);
     }
 
-    let mut sorted_results: Vec<_> = vote_counts.into_iter().collect();
+    let mut sorted_results = vote_counts.into_iter().collect::<Vec<_>>();
     sorted_results.sort_by(|a, b| b.1.cmp(&a.1));
+    let sorted_results = sorted_results
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
 
     if sorted_results.len() < 2 {
-        return Err(RestError::internal(
-            "Insufficient results to compute rankings",
-        ));
+        return Err(RestError::internal("Unable to compute results"));
     }
 
-    let first = sorted_results[0].0.clone();
-    let second = sorted_results[1].0.clone();
-    let third = sorted_results.get(2).map(|(id, _)| id.clone());
-    let remaining = sorted_results
-        .into_iter()
-        .skip(3)
-        .map(|(id, _)| id)
-        .collect();
+    let first = sorted_results[0].clone();
+    let second = sorted_results[1].clone();
+    let third = sorted_results.get(2).cloned();
+    let mut remaining = sorted_results.into_iter().skip(3).collect::<Vec<_>>();
+
+    remaining.shuffle(&mut rng());
 
     Ok(Json(FetchVoteResults {
         id: poll.id,

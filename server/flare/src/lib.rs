@@ -6,7 +6,6 @@ mod db;
 mod logging;
 mod macros;
 mod store;
-mod util;
 
 use std::{
     net::{Ipv6Addr, SocketAddr},

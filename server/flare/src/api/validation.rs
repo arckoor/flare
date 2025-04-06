@@ -1,3 +1,5 @@
+use std::io::BufReader;
+
 use image::{GenericImageView, ImageReader};
 
 use super::{api_params::Paginator, error::RestError};
@@ -48,14 +50,13 @@ pub fn inspect_validate_image(
         a
     }
 
-    let mut reader = ImageReader::new(std::io::Cursor::new(data));
-    reader.set_format(
+    let image = ImageReader::with_format(
+        BufReader::new(std::io::Cursor::new(data)),
         image::ImageFormat::from_mime_type(format)
             .ok_or(RestError::bad_req("Invalid content type"))?,
-    );
-    let image = reader
-        .decode()
-        .map_err(|_| RestError::bad_req("Failed to read image"))?;
+    )
+    .decode()
+    .map_err(|_| RestError::bad_req("Failed to read image"))?;
 
     let dimensions = image.dimensions();
     let divisor = gcd(dimensions.0, dimensions.1);

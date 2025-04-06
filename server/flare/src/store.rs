@@ -1,6 +1,11 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
+    api::error::RestError,
     auth::{jwt::Jwt, oauth::Providers},
     config::StoreConfig,
     db::Database,
@@ -38,6 +43,12 @@ impl Store {
             jwt,
             oauth: providers,
         }
+    }
+
+    pub fn now() -> Result<Duration, RestError> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RestError::internal("Failed to get system time"))
     }
 }
 

@@ -12,7 +12,7 @@ use sea_orm::entity::prelude::*;
 use secstr::{SecStr, SecUtf8};
 use serde::{Deserialize, Serialize};
 
-use crate::{api::error::RestError, config::JwtConfig, db::Database, util::now};
+use crate::{api::error::RestError, config::JwtConfig, db::Database, store::Store};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccessClaims {
@@ -241,7 +241,7 @@ impl Jwt {
 
     // TODO this could be an associated function
     fn generate_time(&self, exp: Duration) -> Result<(u64, u64), RestError> {
-        let now = now()?;
+        let now = Store::now()?;
 
         let expiration = (now + exp).as_secs();
         let now = now.as_secs();

@@ -81,29 +81,27 @@ pub mod mtls {
     use axum_server::tls_rustls::RustlsConfig;
     use rustls::{
         RootCertStore, ServerConfig,
-        pki_types::{CertificateDer, PrivateKeyDer},
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
         server::WebPkiClientVerifier,
     };
 
     fn load_public_pem(path: &Path) -> Vec<CertificateDer<'static>> {
         let file = File::open(path).unwrap();
         let mut reader = BufReader::new(file);
-        let certs = rustls_pemfile::certs(&mut reader)
+        CertificateDer::pem_reader_iter(&mut reader)
             .map(|c| c.unwrap())
-            .collect::<Vec<CertificateDer>>();
-
-        certs
+            .collect::<Vec<CertificateDer>>()
     }
 
     fn load_private_pem(path: &Path) -> PrivateKeyDer<'static> {
         let file = File::open(path).unwrap();
         let mut reader = BufReader::new(file);
-        let key = rustls_pemfile::pkcs8_private_keys(&mut reader)
+        let key = PrivatePkcs8KeyDer::pem_reader_iter(&mut reader)
             .map(|k| k.unwrap())
             .next()
             .unwrap();
 
-        rustls::pki_types::PrivateKeyDer::Pkcs8(key)
+        PrivateKeyDer::Pkcs8(key)
     }
 
     fn load_root_store(path: &Path) -> RootCertStore {
