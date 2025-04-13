@@ -45,7 +45,6 @@ impl Database {
 
         Database::init_admin(config.admin.clone(), &sea).await;
 
-        // TODO why are we storing the redis client, and not the connection
         Self { sea, redis }
     }
 
@@ -114,7 +113,6 @@ impl Database {
     }
 
     pub fn filter_polls(
-        &self,
         user_id: &str,
         groups: Vec<String>,
         group_id: Option<String>,
@@ -126,14 +124,51 @@ impl Database {
     }
 
     pub fn filter_poll_by_id(
-        &self,
         poll_id: &str,
         user_id: &str,
         groups: Vec<String>,
     ) -> sea_orm::Condition {
         sea_orm::Condition::all()
             .add(sea_entity::poll::Column::Id.eq(poll_id))
-            .add(self.filter_polls(user_id, groups, None))
+            .add(Database::filter_polls(user_id, groups, None))
+    }
+
+    pub fn filter_group_user(group_id: &str, user_id: &str) -> sea_orm::Condition {
+        sea_orm::Condition::all()
+            .add(sea_entity::group_user::Column::GroupId.eq(group_id))
+            .add(sea_entity::group_user::Column::UserId.eq(user_id))
+    }
+
+    pub fn filter_group_by_owner(group_id: &str, owner_id: &str) -> sea_orm::Condition {
+        sea_orm::Condition::all()
+            .add(sea_entity::group::Column::Id.eq(group_id))
+            .add(sea_entity::group::Column::OwnerId.eq(owner_id))
+    }
+
+    pub async fn remove_user_from_group<C>(
+        db: &C,
+        group: &str,
+        user: &str,
+        group_owner: &str,
+    ) -> Result<(), RestError>
+    where
+        C: ConnectionTrait,
+    {
+        sea_entity::group_user::Entity::delete_by_id((group.to_string(), user.to_string()))
+            .exec(db)
+            .await?;
+
+        sea_entity::poll::Entity::update_many()
+            .col_expr(sea_entity::poll::Column::OwnerId, Expr::value(group_owner))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sea_entity::poll::Column::OwnerId.eq(user.to_string()))
+                    .add(sea_entity::poll::Column::GroupId.eq(group)),
+            )
+            .exec(db)
+            .await?;
+
+        Ok(())
     }
 
     async fn init_admin(config: AdminConfig, sea: &DatabaseConnection) {
@@ -177,17 +212,19 @@ impl Database {
                 }
             }
 
-            if sea_entity::o_auth_user::Entity::find()
-                .filter(sea_entity::o_auth_user::Column::UserId.eq(admin.id.clone()))
-                .count(txn)
-                .await?
-                == 0
-            {
-                panic!("You must configure at least on login method for the admin user");
-            }
+            assert_ne!(
+                sea_entity::o_auth_user::Entity::find()
+                    .filter(sea_entity::o_auth_user::Column::UserId.eq(admin.id.clone()))
+                    .count(txn)
+                    .await?,
+                0,
+                "You must configure at least one login method for the admin user"
+            );
 
             Ok(())
         })
         .expect("Failed to init admin");
     }
 }
+
+// TODO pub struct Filters {} ?

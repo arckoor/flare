@@ -19,11 +19,11 @@ required-features = ["api-doc"]
 test = false
 
 [dependencies]
-aes-gcm = "0.10.3"
 ammonia = "4.0.0"
 axum = { version = "0.8.1", features = ["multipart"] }
 axum-extra = { version = "0.10.0", features = ["typed-header", "cookie"] }
 axum-server = { version = "0.7.2", features = ["tls-rustls"] }
+botan = { version = "0.11.1", features = ["vendored"] }
 config = { version = "0.15.11", features = ["toml"], default-features = false }
 cookie = "0.18.1"
 cuid2 = "0.1.4"
@@ -37,7 +37,10 @@ mime = "0.3.17"
 oauth2 = "5.0.0"
 rand = "0.9.0"
 redis = { version = "0.29.2", features = ["aio", "tokio-comp"] }
-reqwest = { version = "0.12.15", features = ["json"], default-features = false }
+reqwest = { version = "0.12.15", features = [
+  "rustls-tls",
+  "json",
+], default-features = false }
 rustls = { version = "0.23.25", features = [
   "aws_lc_rs",
 ], default-features = false }

@@ -38,6 +38,7 @@ struct JWTSettings {
 
 impl JWTSettings {
     pub fn new(secret: &SecStr) -> Self {
+        // TODO should we periodically re-key?
         let encoding_key = EncodingKey::from_secret(secret.unsecure());
         let decoding_key = DecodingKey::from_secret(secret.unsecure());
         let algorithm = Algorithm::HS512;
@@ -92,7 +93,7 @@ impl Jwt {
     }
 
     pub async fn refresh(&self, jar: CookieJar) -> Result<(SecUtf8, CookieJar), RestError> {
-        let refresh_token = match jar.get(Jwt::REFRESH_TOKEN) {
+        let refresh_token = match jar.get(Self::REFRESH_TOKEN) {
             Some(token) => token.value(),
             None => return Err(RestError::unauthorized("No refresh token found")),
         };
@@ -105,7 +106,7 @@ impl Jwt {
         .map_err(|_| RestError::unauthorized("Invalid token"))?
         .claims;
 
-        self.check_expiry(Jwt::REFRESH_PREFIX, &claims.sub, claims.iat)
+        self.check_expiry(Self::REFRESH_PREFIX, &claims.sub, claims.iat)
             .await?;
 
         let user = sea_entity::user::Entity::find_by_id(&claims.sub)
@@ -123,17 +124,16 @@ impl Jwt {
         }
     }
 
-    // todo should this really be public?
     pub async fn revoke_refresh(&self, id: &str) -> Result<(), RestError> {
         let (now, refresh_expiry) = self.generate_time(self.refresh_expiry)?;
-        self.set_nbf(Jwt::REFRESH_PREFIX, id, refresh_expiry, now + 120)
+        self.set_nbf(Self::REFRESH_PREFIX, id, refresh_expiry, now + 120)
             .await?;
         Ok(())
     }
 
     pub async fn revoke_access(&self, id: &str) -> Result<(), RestError> {
         let (now, access_expiry) = self.generate_time(self.access_expiry)?;
-        self.set_nbf(Jwt::ACCESS_PREFIX, id, access_expiry, now + 120)
+        self.set_nbf(Self::ACCESS_PREFIX, id, access_expiry, now + 120)
             .await?;
         Ok(())
     }
@@ -180,7 +180,7 @@ impl Jwt {
             iat: now,
         };
 
-        self.set_nbf(Jwt::REFRESH_PREFIX, &user.id, expiration, now)
+        self.set_nbf(Self::REFRESH_PREFIX, &user.id, expiration, now)
             .await?;
 
         let token = SecUtf8::from(
@@ -197,7 +197,7 @@ impl Jwt {
         let header = Header::new(self.access.algorithm);
         let (now, expiration) = self.generate_time(self.access_expiry)?;
 
-        self.set_nbf(Jwt::ACCESS_PREFIX, &user.id, expiration, now)
+        self.set_nbf(Self::ACCESS_PREFIX, &user.id, expiration, now)
             .await?;
 
         let groups = sea_entity::group_user::Entity::find()
@@ -233,7 +233,7 @@ impl Jwt {
         .map_err(|_| RestError::unauthorized("Invalid token"))?
         .claims;
 
-        self.check_expiry(Jwt::ACCESS_PREFIX, &claims.sub, claims.iat)
+        self.check_expiry(Self::ACCESS_PREFIX, &claims.sub, claims.iat)
             .await?;
 
         Ok(claims)
@@ -248,6 +248,8 @@ impl Jwt {
         Ok((now, expiration))
     }
 
+    // TODO we use this elsewhere, it doesn't really belong here
+    // the domain is also only used for this, so it can go to a separate struct too
     pub fn build_cookie(
         &self,
         name: String,
@@ -274,10 +276,10 @@ impl Jwt {
         token: &SecUtf8,
         expiry: f64,
     ) -> (Cookie<'static>, Cookie<'static>) {
-        let token = self.build_cookie(Jwt::REFRESH_TOKEN.to_string(), token, expiry, true);
+        let token = self.build_cookie(Self::REFRESH_TOKEN.to_string(), token, expiry, true);
 
         let indicator = self.build_cookie(
-            Jwt::REFRESH_INDICATOR.to_string(),
+            Self::REFRESH_INDICATOR.to_string(),
             &SecUtf8::from("true"),
             expiry,
             false,
@@ -331,7 +333,7 @@ impl Jwt {
             let expiry = Duration::from_secs(expiry);
             let iat = Duration::from_secs(iat);
             if expiry > iat {
-                return Err(RestError::unauthorized("Token has been revoked"));
+                return Err(RestError::forbidden("Token has been revoked"));
             }
         }
 

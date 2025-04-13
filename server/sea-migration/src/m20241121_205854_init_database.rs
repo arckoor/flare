@@ -187,7 +187,7 @@ impl MigrationTrait for Migration {
                         ForeignKey::create()
                             .from(Poll::Table, Poll::GroupId)
                             .to(Group::Table, Group::Id)
-                            .on_delete(ForeignKeyAction::SetNull)
+                            .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .foreign_key(
@@ -202,12 +202,33 @@ impl MigrationTrait for Migration {
             .await?;
 
         manager
+            .create_index(
+                Index::create()
+                    .name("idx-poll-created-at")
+                    .table(Poll::Table)
+                    .col(Poll::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-poll-ends")
+                    .table(Poll::Table)
+                    .col(Poll::Ends)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
             .create_table(
                 Table::create()
                     .table(Image::Table)
                     .if_not_exists()
                     .col(string(Image::Id).primary_key())
                     .col(string(Image::AspectRatio))
+                    .col(string(Image::Mime))
                     .col(string(Image::UserId))
                     .col(string_null(Image::PollId))
                     .col(double(Image::CreatedAt).default(current_ts.clone()))
@@ -236,20 +257,12 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(integer(Vote::Id).primary_key().auto_increment())
                     .col(string(Vote::ImageId))
-                    .col(string(Vote::PollId))
                     .col(double(Vote::CreatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
                             .from(Vote::Table, Vote::ImageId)
                             .to(Image::Table, Image::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
-                            .on_update(ForeignKeyAction::Cascade),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(Vote::Table, Vote::PollId)
-                            .to(Poll::Table, Poll::Id)
-                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -262,8 +275,8 @@ impl MigrationTrait for Migration {
                     .table(EphemeralUser::Table)
                     .if_not_exists()
                     .col(integer(EphemeralUser::Id).primary_key().auto_increment())
-                    .col(string(EphemeralUser::Cookie))
-                    .col(string(EphemeralUser::Ip))
+                    .col(string_len(EphemeralUser::Cookie, 24))
+                    .col(string_len(EphemeralUser::Ip, 128))
                     .col(double(EphemeralUser::CreatedAt).default(current_ts.clone()))
                     .to_owned(),
             )
@@ -415,6 +428,7 @@ enum Poll {
 enum Image {
     Table,
     Id,
+    Mime,
     AspectRatio,
     UserId,
     PollId,
@@ -426,7 +440,6 @@ enum Vote {
     Table,
     Id,
     ImageId,
-    PollId,
     CreatedAt,
 }
 

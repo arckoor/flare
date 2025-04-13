@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{self, Display, Formatter},
     os::unix::ffi::OsStrExt,
     path::{Component, Path},
@@ -24,14 +24,26 @@ const fn default_page() -> u64 {
     0
 }
 
+pub trait PaginatedSort {}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Paginator {
+pub enum FetchPollSort {
+    CreatedAt,
+    Title,
+    Ends,
+}
+
+impl PaginatedSort for FetchPollSort {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Paginator<S: PaginatedSort> {
     #[serde(default = "default_page")]
     pub page: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
     #[serde(default)]
     pub asc: bool,
+    pub sort_by: Option<S>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -90,8 +102,9 @@ pub struct AddPoll {
     pub info: String,
     /// timestamp in seconds (Unix time)
     pub ends: f64,
-    pub images: Vec<String>,
+    pub images: HashSet<String>,
     pub allowed_votes: u32,
+    pub group: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -126,7 +139,9 @@ pub struct FetchPoll {
     pub ends: f64,
     pub allowed_votes: u32,
     pub votes: u64,
-    pub images: Vec<String>,
+    pub images: HashSet<String>,
+    pub aspect_ratios: HashMap<String, String>,
+    pub group: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -136,8 +151,8 @@ pub struct EditPoll {
     pub info: Option<String>,
     pub ends: Option<f64>,
     pub allowed_votes: Option<u32>,
-    pub add_images: Option<Vec<String>>,
-    pub remove_images: Option<Vec<String>>,
+    pub add_images: Option<HashSet<String>>,
+    pub remove_images: Option<HashSet<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -191,14 +206,15 @@ pub struct FetchVotingPoll {
     pub info: String,
     pub ends: f64,
     pub allowed_votes: u32,
-    pub images: Vec<String>,
+    pub images: HashSet<String>,
+    pub aspect_ratios: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[cfg_attr(feature = "api-doc", derive(utoipa::ToSchema))]
 pub struct FetchVote {
     pub created: f64,
-    pub votes: Vec<String>,
+    pub votes: HashSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -214,7 +230,7 @@ pub struct FetchVoteResults {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[cfg_attr(feature = "api-doc", derive(utoipa::ToSchema))]
 pub struct Vote {
-    pub votes: Vec<String>,
+    pub votes: HashSet<String>,
 }
 
 #[derive(Serialize, PartialEq, Eq, Clone, Debug)]
@@ -246,7 +262,7 @@ impl FileName {
             .as_os_str()
             .as_bytes()
             .iter()
-            .any(|c| !c.is_ascii_alphanumeric() && c != &b'.' && c != &b'_' && c != &b'-')
+            .any(|c| !c.is_ascii_alphanumeric() && c != &b'.')
         {
             return err;
         }

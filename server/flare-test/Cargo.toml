@@ -6,6 +6,10 @@ edition = "2024"
 [dev-dependencies]
 flare = { path = "../flare" }
 flare-sim = { path = "../flare-sim", features = ["sim"] }
-reqwest = { version = "0.12.15", features = ["json", "cookies", "multipart"] }
+reqwest = { version = "0.12.15", features = [
+  "json",
+  "cookies",
+  "multipart",
+], default-features = false }
 sea-entity = { path = "../sea-entity" }
 tokio = { version = "1.44.1", features = ["full"] }

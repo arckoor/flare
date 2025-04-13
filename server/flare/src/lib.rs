@@ -10,9 +10,12 @@ mod store;
 use std::{
     net::{Ipv6Addr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
+use axum_server::Handle;
 use config::FlareConfig;
+use tokio::signal;
 
 pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
     let FlareConfig { store, server } = config;
@@ -30,6 +33,9 @@ pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
         .init();
 
     let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, server.port));
+    let handle = Handle::new();
+
+    tokio::spawn(graceful_shutdown(handle.clone()));
 
     {
         #[cfg(not(feature = "sim"))]
@@ -43,10 +49,33 @@ pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
         #[cfg(feature = "sim")]
         axum_server::bind(addr)
     }
+    .handle(handle)
     .serve(router.into_make_service_with_connect_info::<SocketAddr>())
     .await
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    // Todo graceful shutdown
 
     Ok(())
+}
+
+async fn graceful_shutdown(handle: Handle) {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Received shutdown signal, shutting down gracefully...");
+    handle.graceful_shutdown(Some(Duration::from_secs(30)));
 }

@@ -9,9 +9,9 @@ use tracing::info;
 use crate::sim::{FLARE_PORT, FLARE_SERVER};
 use flare::{
     api::api_params::{
-        AddGroup, AddPoll, AddedPoll, EditGroup, EditPoll, FetchPoll, FetchPolls, FetchResults,
-        FetchVote, FetchVoteResults, FetchVotingPoll, Group, LoginInfo, Paginator, PublishResults,
-        TokenResponse, UploadedImage, Vote,
+        AddGroup, AddPoll, AddedPoll, EditGroup, EditPoll, FetchPoll, FetchPollSort, FetchPolls,
+        FetchResults, FetchVote, FetchVoteResults, FetchVotingPoll, Group, LoginInfo, Paginator,
+        PublishResults, TokenResponse, UploadedImage, Vote,
     },
     auth::jwt::AccessClaims,
 };
@@ -21,11 +21,11 @@ pub struct Http {
     pub cookie_store: Arc<reqwest_cookie_store::CookieStoreMutex>,
     pub capture_bearer: bool,
     pub bearer: Option<String>,
-    pub ip: Option<String>,
+    pub ip: String,
 }
 
 impl Http {
-    pub fn new_with_cookies(capture_bearer: bool, ip: Option<String>) -> Self {
+    pub fn new_with_cookies(capture_bearer: bool, ip: String) -> Self {
         let cookie_store = {
             let c = reqwest_cookie_store::CookieStore::default();
             let c = reqwest_cookie_store::CookieStoreMutex::new(c);
@@ -90,12 +90,9 @@ impl Http {
     {
         let url = format!("http://[{}]:{}{}", host, port, path.into());
         let builder = self.client.request(method, &url);
-        let mut builder = RequestBuilder::new(builder);
+        let mut builder = RequestBuilder::new(builder).header("X-Forwarded-For", &self.ip);
         if let Some(bearer) = &self.bearer {
             builder = builder.bearer_auth(bearer.clone());
-        }
-        if let Some(ip) = &self.ip {
-            builder = builder.header("X-Forwarded-For", ip);
         }
         builder
     }
@@ -217,7 +214,7 @@ impl RequestBuilder {
     }
 }
 
-pub fn logins() -> [LoginInfo; 4] {
+pub fn logins() -> [LoginInfo; 5] {
     [
         LoginInfo {
             id: "admin".to_string(),
@@ -230,6 +227,9 @@ pub fn logins() -> [LoginInfo; 4] {
         },
         LoginInfo {
             id: "baz".to_string(),
+        },
+        LoginInfo {
+            id: "tester".to_string(),
         },
     ]
 }
@@ -258,24 +258,13 @@ pub fn jpg_images() -> [&'static [u8]; 4] {
     ]
 }
 
-pub async fn get_client(user: usize, with_ip: bool) -> Result<(Http, String), reqwest::Error> {
+pub async fn get_client(user: usize) -> (Http, String) {
     let login_info = &logins()[user];
 
-    let mut client = Http::new_with_cookies(
-        true,
-        if with_ip {
-            Some(login_info.id.clone())
-        } else {
-            None
-        },
-    );
+    let mut client = Http::new_with_cookies(true, login_info.id.clone());
 
-    let _ = login(&mut client, &login_info).await?;
-    Ok((client, login_info.id.clone()))
-}
-
-pub async fn get_default_client() -> Result<Http, reqwest::Error> {
-    Ok(get_client(0, true).await?.0)
+    login(&mut client, &login_info).await.unwrap();
+    (client, login_info.id.clone())
 }
 
 pub async fn wait_for_api(client: &Http) {
@@ -340,10 +329,10 @@ pub async fn fetch_image(client: &Http, name: &str) -> Result<Vec<u8>, reqwest::
 
 pub async fn add_image(
     client: &Http,
-    image: Vec<u8>,
+    image: &[u8],
     mime: &str,
 ) -> Result<UploadedImage, reqwest::Error> {
-    let part = reqwest::multipart::Part::bytes(image)
+    let part = reqwest::multipart::Part::bytes(image.to_vec())
         .file_name("image.png")
         .mime_str(mime)
         .unwrap();
@@ -371,7 +360,7 @@ pub async fn fetch_poll(client: &Http, poll_id: &str) -> Result<FetchPoll, reqwe
 
 pub async fn fetch_polls(
     client: &Http,
-    paginator: Option<Paginator>,
+    paginator: Option<Paginator<FetchPollSort>>,
 ) -> Result<FetchPolls, reqwest::Error> {
     let mut res = get(client, "/api/polls");
     if let Some(paginator) = paginator {

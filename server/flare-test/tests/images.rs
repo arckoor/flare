@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use flare::api::api_params::AddPoll;
 use flare_sim::{
     helpers::{
-        add_image, add_poll, fetch_image, fetch_voting_image, get_default_client, jpg_images,
+        add_image, add_poll, fetch_image, fetch_poll, fetch_voting_image, get_client, jpg_images,
         login, logins, logout, png_images, post, remove_image,
     },
     test_builder::flare_test,
@@ -15,17 +17,16 @@ fn test_add_image() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let mut client = get_default_client().await.unwrap();
+            let client = get_client(0).await.0;
+            let other_client = get_client(1).await.0;
 
             let image = png_images()[0];
 
-            let uploaded_image = add_image(&client, image.to_vec(), "image/png")
-                .await
-                .unwrap();
+            let uploaded_image = add_image(&client, image, "image/png").await.unwrap();
 
             let fetched_image = fetch_image(&client, &uploaded_image.name).await.unwrap();
 
-            assert_eq!(image.to_vec(), fetched_image);
+            assert_eq!(image, fetched_image);
 
             assert!(
                 fetch_image(&client, "test")
@@ -34,7 +35,7 @@ fn test_add_image() -> turmoil::Result {
             );
 
             // not setting a mime type
-            let part = reqwest::multipart::Part::bytes(image.to_vec()).file_name("image.png");
+            let part = reqwest::multipart::Part::bytes(image).file_name("image.png");
             let form = reqwest::multipart::Form::new().part("image", part);
 
             assert!(
@@ -75,48 +76,31 @@ fn test_add_image() -> turmoil::Result {
             );
 
             assert!(
-                add_image(&client, image.to_vec(), "image/jpeg")
+                add_image(&client, image, "image/jpeg")
                     .await
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
             assert!(
-                add_image(&client, image.to_vec(), "application/json")
+                add_image(&client, image, "application/json")
                     .await
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            logout(&mut client).await.unwrap();
-            login(&mut client, &logins()[1]).await.unwrap();
-
             assert!(
-                fetch_image(&client, &uploaded_image.name)
+                fetch_image(&other_client, &uploaded_image.name)
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
 
-            logout(&mut client).await.unwrap();
-
-            client.bearer = Some("invalid".to_string());
-
-            assert!(
-                fetch_image(&client, &uploaded_image.name)
-                    .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
-            );
-
-            login(&mut client, &logins()[0]).await.unwrap();
             for (image, mime) in png_images()
                 .into_iter()
                 .skip(1)
                 .map(|i| (i, "image/png"))
                 .chain(jpg_images().into_iter().map(|i| (i, "image/jpeg")))
             {
-                let uploaded = add_image(&client, image.to_vec(), mime).await.unwrap();
-                assert_eq!(
-                    fetch_image(&client, &uploaded.name).await.unwrap(),
-                    image.to_vec()
-                );
+                let uploaded = add_image(&client, image, mime).await.unwrap();
+                assert_eq!(fetch_image(&client, &uploaded.name).await.unwrap(), image);
             }
 
             Ok(())
@@ -132,11 +116,12 @@ fn test_remove_image() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let mut client = get_default_client().await.unwrap();
+            let mut client = get_client(0).await.0;
 
+            // TODO this needs an upload helper here, and in all the other tests
             let mut images = Vec::new();
             for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image.to_vec(), mime).await.unwrap();
+                let uploaded = add_image(&client, image, mime).await.unwrap();
                 images.push(uploaded.name.clone());
             }
 
@@ -166,6 +151,34 @@ fn test_remove_image() -> turmoil::Result {
                 );
             }
 
+            let mut images = HashSet::new();
+            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
+                let uploaded = add_image(&client, image, mime).await.unwrap();
+                images.insert(uploaded.name.clone());
+            }
+
+            add_poll(
+                &client,
+                AddPoll {
+                    title: "test".to_string(),
+                    info: "testing poll".to_string(),
+                    ends: f64::MAX,
+                    images: images.clone(),
+                    allowed_votes: 2,
+                    group: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            for image in images.iter() {
+                assert!(
+                    remove_image(&client, &image)
+                        .await
+                        .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
+                );
+            }
+
             Ok(())
         });
 
@@ -179,12 +192,18 @@ fn test_fetch_invalid_image() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let client = get_default_client().await.unwrap();
+            let client = get_client(0).await.0;
+
+            assert!(
+                fetch_image(&client, "nonexistant.png")
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
 
             assert!(
                 fetch_image(&client, "non-existant.png")
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+                    .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
             assert!(
@@ -213,22 +232,66 @@ fn test_fetch_invalid_image() -> turmoil::Result {
 }
 
 #[test]
+fn test_aspect_ratio() -> turmoil::Result {
+    flare_test(|sim| {
+        sim.create_basic_scenario();
+
+        sim.client("client", async move {
+            let client = get_client(0).await.0;
+
+            let img_16x9 = png_images()[0];
+            let img_1x1 = png_images()[1];
+
+            let id_16x9 = add_image(&client, img_16x9, "image/png")
+                .await
+                .unwrap()
+                .name;
+
+            let id_1x1 = add_image(&client, img_1x1, "image/png").await.unwrap().name;
+
+            let poll = add_poll(
+                &client,
+                AddPoll {
+                    title: "poll".to_string(),
+                    info: "some info text".to_string(),
+                    ends: f64::MAX,
+                    images: [id_16x9.clone(), id_1x1.clone()].into(),
+                    allowed_votes: 1,
+                    group: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let fetched_poll = fetch_poll(&client, &poll.id).await.unwrap();
+
+            assert_eq!(fetched_poll.aspect_ratios.get(&id_16x9).unwrap(), "16/9");
+            assert_eq!(fetched_poll.aspect_ratios.get(&id_1x1).unwrap(), "1/1");
+
+            Ok(())
+        });
+
+        sim.run()
+    })
+}
+
+#[test]
 fn test_voting_image() -> turmoil::Result {
     flare_test(|sim| {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let client = get_default_client().await.unwrap();
+            let client = get_client(0).await.0;
 
-            let mut images = Vec::new();
+            let mut images = HashSet::new();
             for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image.to_vec(), mime)
+                let uploaded = add_image(&client, image, mime)
                     .await
                     .unwrap()
                     .name
                     .to_string();
 
-                images.push(uploaded);
+                images.insert(uploaded);
             }
 
             add_poll(
@@ -239,6 +302,7 @@ fn test_voting_image() -> turmoil::Result {
                     ends: f64::MAX,
                     allowed_votes: 3,
                     images: images.clone(),
+                    group: None,
                 },
             )
             .await
@@ -252,10 +316,67 @@ fn test_voting_image() -> turmoil::Result {
             }
 
             assert!(
-                fetch_voting_image(&client, "non-existant.png")
+                fetch_voting_image(&client, "nonexistant.png")
                     .await
                     .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
+
+            Ok(())
+        });
+
+        sim.run()
+    })
+}
+
+#[test]
+fn test_group_image() -> turmoil::Result {
+    flare_test(|sim| {
+        sim.create_basic_scenario();
+        sim.group_users("sharing-images", 0, vec![1]);
+
+        sim.client("client", async move {
+            let client = get_client(0).await.0;
+            let other_client = get_client(1).await.0;
+
+            let mut images = HashSet::new();
+            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
+                let uploaded = add_image(&client, image, mime)
+                    .await
+                    .unwrap()
+                    .name
+                    .to_string();
+
+                images.insert(uploaded);
+            }
+
+            for image in images.iter() {
+                assert!(fetch_image(&client, image).await.is_ok());
+                assert!(
+                    fetch_image(&other_client, image)
+                        .await
+                        .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+                );
+            }
+
+            add_poll(
+                &client,
+                AddPoll {
+                    title: "test".to_string(),
+                    info: "i belong to a group!".to_string(),
+                    ends: f64::MAX,
+                    images: images.clone(),
+                    allowed_votes: 2,
+                    group: Some(client.get_groups()[0].clone()),
+                },
+            )
+            .await
+            .unwrap();
+
+            for image in images.iter() {
+                let client_image = fetch_image(&client, image).await.unwrap();
+                let other_client_image = fetch_image(&other_client, image).await.unwrap();
+                assert_eq!(client_image, other_client_image);
+            }
 
             Ok(())
         });

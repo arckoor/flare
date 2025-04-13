@@ -14,7 +14,7 @@ For configuration options of those services, see the shell.nix file.
 ### Setup
 Copy [config.toml.example](/server/config.toml.example) and rename it to `config.toml`.
 Some entries already have defaults, others you will have to configure yourself.
-Cryptographically strong secrets for the JWT implementation can be generated using `openssl rand -hex 64`.
+Cryptographically strong secrets for the JWT implementation can be generated using `botan rng --format=hex 64`.
 
 #### Certificates and mTLS
 flare uses mTLS between itself and the exposing reverse proxy.

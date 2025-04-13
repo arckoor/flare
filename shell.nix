@@ -18,8 +18,8 @@ pkgs.mkShell {
     cargo-nextest
     sea-orm-cli
 
-    openssl
-    pkg-config
+    botan3
+    python313
 
     postgresql
     redis
@@ -28,13 +28,14 @@ pkgs.mkShell {
   RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
 
   shellHook = ''
-    alias cclean="cargo clean";
-    alias cbuild="cargo build";
-    alias ctest="cargo nextest run --workspace";
-    alias cfmt="cargo fmt";
-    alias cclippy="cargo clippy -- -D warnings";
-    alias gen="sea-orm-cli generate entity -u postgres://flare:12345@localhost:5432/flare-db-test -o sea-entity/src --lib --with-serde both --with-copy-enums";
+    alias cclean="cargo clean"
+    alias cbuild="cargo build"
+    alias ctest="cargo nextest run --workspace"
+    alias cfmt="cargo fmt"
+    alias cclippy="cargo clippy -- -D warnings"
+    alias gen="sea-orm-cli generate entity -u postgres://flare:12345@localhost:5432/flare-db-test -o sea-entity/src --lib --with-serde both --with-copy-enums"
     alias mig="sea-orm-cli migrate -d sea-migration generate"
+    alias cov="cargo llvm-cov nextest --no-fail-fast --all --ignore-filename-regex '(sea-entity|sea-migration).*\.rs' --color always --html --open"
 
     export NIX_SHELL_DIR="$PWD/.nix-shell"
     export PGDATA="$NIX_SHELL_DIR/postgres"

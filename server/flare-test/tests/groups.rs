@@ -15,9 +15,9 @@ fn test_groups() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let (mut client, client_id) = get_client(0, false).await.unwrap();
-            let (mut user_a, user_a_id) = get_client(1, false).await.unwrap();
-            let (mut user_b, user_b_id) = get_client(2, false).await.unwrap();
+            let (mut client, client_id) = get_client(0).await;
+            let (mut user_a, user_a_id) = get_client(1).await;
+            let (mut user_b, user_b_id) = get_client(2).await;
 
             let group = add_group(
                 &client,
@@ -35,9 +35,12 @@ fn test_groups() -> turmoil::Result {
             assert!(
                 auth_ping(&client)
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
+                    .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
             );
             refresh(&mut client).await.unwrap();
+            let client_groups = client.get_groups();
+            assert!(client_groups.len() == 1);
+            assert!(client_groups[0] == group.id);
 
             let fetched_group = fetch_group(&client, &group.id).await.unwrap();
             assert!(fetched_group.members.len() == 1);
@@ -59,7 +62,7 @@ fn test_groups() -> turmoil::Result {
             assert!(
                 auth_ping(&user_a)
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
+                    .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
             );
 
             refresh(&mut user_a).await.unwrap();
@@ -87,7 +90,7 @@ fn test_groups() -> turmoil::Result {
             assert!(
                 auth_ping(&user_b)
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
+                    .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
             );
             refresh(&mut user_b).await.unwrap();
 
@@ -136,21 +139,33 @@ fn test_groups() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
 
+            add_group_user(&user_a, &group.id, &user_b_id)
+                .await
+                .unwrap();
+
             remove_group(&user_a, &group.id).await.unwrap();
+
+            assert!(
+                join_group(&user_b, &group.id)
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
 
             assert!(
                 auth_ping(&client)
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
+                    .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
             );
 
             assert!(
                 auth_ping(&user_a)
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
+                    .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
             );
 
             refresh(&mut client).await.unwrap();
+            let client_groups = client.get_groups();
+            assert!(client_groups.len() == 0);
 
             assert!(
                 fetch_group(&client, &group.id)
@@ -172,8 +187,8 @@ fn test_group_errors() -> turmoil::Result {
         sim.group_users("test-group", 0, vec![1]);
 
         sim.client("client", async move {
-            let (client, client_id) = get_client(0, false).await.unwrap();
-            let (user_a, user_a_id) = get_client(1, false).await.unwrap();
+            let (client, client_id) = get_client(0).await;
+            let (user_a, user_a_id) = get_client(1).await;
 
             let group_id = client.get_groups()[0].clone();
 

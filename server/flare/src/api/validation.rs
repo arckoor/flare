@@ -2,11 +2,17 @@ use std::io::BufReader;
 
 use image::{GenericImageView, ImageReader};
 
-use super::{api_params::Paginator, error::RestError};
+use super::{
+    api_params::{PaginatedSort, Paginator},
+    error::RestError,
+};
 
 type AspectRatio = String;
 
-pub fn validate_paginator(paginator: &Paginator, max_limit: u64) -> Result<(), RestError> {
+pub fn validate_paginator<S: PaginatedSort>(
+    paginator: &Paginator<S>,
+    max_limit: u64,
+) -> Result<(), RestError> {
     if paginator.page_size == 0 {
         return Err(RestError::bad_req(
             "Page size must be greater than 0".to_string(),
@@ -39,7 +45,7 @@ pub fn validate_user_text(texts: Vec<&str>) -> Result<(), RestError> {
 
 pub fn inspect_validate_image(
     data: &axum::body::Bytes,
-    format: mime::Mime,
+    format: &mime::Mime,
 ) -> Result<AspectRatio, RestError> {
     fn gcd(mut a: u32, mut b: u32) -> u32 {
         while b != 0 {

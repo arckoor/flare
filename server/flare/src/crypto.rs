@@ -1,4 +1,3 @@
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
 use secstr::{SecStr, SecUtf8};
 use serde::{Deserialize, Serializer};
 
@@ -7,7 +6,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let s: String = Deserialize::deserialize(deserializer)?;
-    let bytes = hex_utils::from_hex(&s).map_err(serde::de::Error::custom)?;
+    let bytes = botan::hex_decode(&s).map_err(serde::de::Error::custom)?;
     Ok(SecStr::from(bytes))
 }
 
@@ -31,46 +30,39 @@ pub struct PkceCipher {
 }
 
 impl PkceCipher {
+    const ALGO_NAME: &'static str = "AES-256/GCM";
+
     pub fn new(key: &SecStr) -> Self {
         Self { key: key.clone() }
     }
 
     pub fn encrypt(&self, data: &[u8]) -> String {
-        let key = Key::<Aes256Gcm>::from_slice(self.key.unsecure());
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Aes256Gcm::generate_nonce(&mut aes_gcm::aead::OsRng);
-        let encrypted = cipher.encrypt(&nonce, data).unwrap();
+        let mut cipher =
+            botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Encrypt).unwrap();
+        cipher.set_key(self.key.unsecure()).unwrap();
+
+        let nonce = botan::RandomNumberGenerator::new()
+            .unwrap()
+            .read(cipher.default_nonce_length())
+            .unwrap();
+
+        let encrypted = cipher.process(&nonce, data).unwrap();
         let mut result = Vec::with_capacity(nonce.len() + encrypted.len());
         result.extend_from_slice(nonce.as_ref());
         result.extend_from_slice(&encrypted);
-        hex_utils::to_hex(&result)
+
+        botan::hex_encode(&result).unwrap()
     }
 
     pub fn decrypt(&self, data: &str) -> Vec<u8> {
-        let key = Key::<Aes256Gcm>::from_slice(self.key.unsecure());
-        let cipher = Aes256Gcm::new(key);
-        let data = hex_utils::from_hex(data).unwrap();
-        let nonce = Nonce::from_slice(&data[..12]);
-        let decrypted = cipher.decrypt(nonce, &data[12..]).unwrap();
+        let mut cipher =
+            botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Decrypt).unwrap();
+        cipher.set_key(self.key.unsecure()).unwrap();
+
+        let data = botan::hex_decode(data).unwrap();
+        let nonce = &data[..12];
+        let decrypted = cipher.process(nonce, &data[12..]).unwrap();
         decrypted.to_vec()
-    }
-}
-
-mod hex_utils {
-    use std::fmt::Write;
-
-    pub fn to_hex(data: &[u8]) -> String {
-        data.iter().fold(String::new(), |mut output, b| {
-            let _ = write!(output, "{b:02x}");
-            output
-        })
-    }
-
-    pub fn from_hex(data: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
-        (0..data.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&data[i..i + 2], 16))
-            .collect()
     }
 }
 

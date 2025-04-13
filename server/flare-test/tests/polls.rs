@@ -1,9 +1,11 @@
-use flare::api::api_params::{AddPoll, EditPoll, Paginator, PublishResults, Vote};
+use std::collections::HashSet;
+
+use flare::api::api_params::{AddPoll, EditPoll, FetchPollSort, Paginator, PublishResults, Vote};
 use flare_sim::{
     helpers::{
         add_image, add_poll, edit_poll, fetch_poll, fetch_polls, fetch_results, fetch_vote,
-        fetch_voting_poll, fetch_voting_results, get_client, get_default_client, login, logins,
-        logout, png_images, publish_results, remove_poll, vote,
+        fetch_voting_poll, fetch_voting_results, get_client, login, logins, logout, png_images,
+        publish_results, remove_poll, vote,
     },
     test_builder::flare_test,
     turmoil,
@@ -16,11 +18,12 @@ fn test_add_remove_poll() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let mut client = get_default_client().await.unwrap();
+            let client = get_client(0).await.0;
+            let other_client = get_client(1).await.0;
 
             let mut images = Vec::new();
             for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image.to_vec(), mime)
+                let uploaded = add_image(&client, image, mime)
                     .await
                     .unwrap()
                     .name
@@ -33,8 +36,9 @@ fn test_add_remove_poll() -> turmoil::Result {
                 title: "foo".to_string(),
                 info: "bar".to_string(),
                 ends: f64::MAX,
-                images: vec![],
+                images: [].into(),
                 allowed_votes: 1,
+                group: None,
             };
 
             // no images
@@ -44,7 +48,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            invalid_poll.images = vec![images[0].clone()];
+            invalid_poll.images = [images[0].clone()].into();
 
             // only a single image
             assert!(
@@ -89,6 +93,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                     ends: f64::MAX,
                     images: images.iter().skip(1).map(|i| i.to_string()).collect(),
                     allowed_votes: 2,
+                    group: None,
                 },
             )
             .await
@@ -99,13 +104,10 @@ fn test_add_remove_poll() -> turmoil::Result {
             assert_eq!(fetched_poll.title, "test");
             assert_eq!(fetched_poll.ends, f64::MAX);
             assert_eq!(fetched_poll.votes, 0);
-            fetched_poll
-                .images
-                .iter()
-                .zip(images.iter().skip(1))
-                .for_each(|(f, i)| {
-                    assert_eq!(f, i);
-                });
+            assert_eq!(fetched_poll.group, None);
+            for image in fetched_poll.images.iter() {
+                assert!(images.iter().skip(1).any(|i| i == image));
+            }
 
             assert!(
                 add_poll(
@@ -116,24 +118,24 @@ fn test_add_remove_poll() -> turmoil::Result {
                         ends: f64::MAX,
                         images: images.iter().map(|i| i.to_string()).collect(),
                         allowed_votes: 2,
+                        group: None,
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            logout(&mut client).await.unwrap();
-            login(&mut client, &logins()[1]).await.unwrap();
-
+            // the image isn't used, but it doesn't belong to this user
             assert!(
                 add_poll(
-                    &client,
+                    &other_client,
                     AddPoll {
                         title: "test".to_string(),
                         info: "some test poll".to_string(),
                         ends: f64::MAX,
-                        images: vec![images[0].clone()],
+                        images: [images[0].clone()].into(),
                         allowed_votes: 1,
+                        group: None,
                     }
                 )
                 .await
@@ -141,13 +143,10 @@ fn test_add_remove_poll() -> turmoil::Result {
             );
 
             assert!(
-                remove_poll(&client, &poll.id)
+                remove_poll(&other_client, &poll.id)
                     .await
                     .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
-
-            logout(&mut client).await.unwrap();
-            login(&mut client, &logins()[0]).await.unwrap();
 
             remove_poll(&client, &poll.id).await.unwrap();
 
@@ -170,7 +169,7 @@ fn test_fetch_polls() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let mut client = get_default_client().await.unwrap();
+            let mut client = get_client(0).await.0;
 
             let polls = fetch_polls(&client, None).await.unwrap();
 
@@ -184,7 +183,8 @@ fn test_fetch_polls() -> turmoil::Result {
                     Some(Paginator {
                         page: 1,
                         page_size: 20,
-                        asc: true
+                        asc: true,
+                        sort_by: None,
                     })
                 )
                 .await
@@ -197,7 +197,8 @@ fn test_fetch_polls() -> turmoil::Result {
                     Some(Paginator {
                         page: 0,
                         page_size: 0,
-                        asc: true
+                        asc: true,
+                        sort_by: None,
                     })
                 )
                 .await
@@ -210,7 +211,8 @@ fn test_fetch_polls() -> turmoil::Result {
                     Some(Paginator {
                         page: 0,
                         page_size: 200,
-                        asc: true
+                        asc: true,
+                        sort_by: None,
                     })
                 )
                 .await
@@ -232,7 +234,7 @@ fn test_fetch_polls() -> turmoil::Result {
             let mut images = Vec::new();
 
             for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image.to_vec(), mime)
+                let uploaded = add_image(&client, image, mime)
                     .await
                     .unwrap()
                     .name
@@ -243,15 +245,23 @@ fn test_fetch_polls() -> turmoil::Result {
 
             let mut polls = Vec::new();
 
-            for images in images.chunks_exact(3) {
+            for (i, images) in images.chunks_exact(3).enumerate() {
+                let (name, ends) = match i {
+                    0 => ("aaaaaaa-poll", f64::MAX - 1.0),
+                    1 => ("fffffff-poll", f64::MAX - 2.0),
+                    2 => ("zzzzzzz-poll", f64::MAX - 3.0),
+                    _ => unreachable!(),
+                };
+
                 let poll = add_poll(
                     &client,
                     AddPoll {
-                        title: "test".to_string(),
+                        title: name.to_string(),
                         info: "some test poll".to_string(),
-                        ends: f64::MAX,
+                        ends,
                         images: images.iter().map(|i| i.to_string()).collect(),
                         allowed_votes: 2,
+                        group: None,
                     },
                 )
                 .await
@@ -262,16 +272,12 @@ fn test_fetch_polls() -> turmoil::Result {
                 let fetched_poll = fetch_poll(&client, &poll.id).await.unwrap();
 
                 assert_eq!(fetched_poll.id, poll.id);
-                assert_eq!(fetched_poll.title, "test");
-                assert_eq!(fetched_poll.ends, f64::MAX);
+                assert_eq!(fetched_poll.title, name);
+                assert_eq!(fetched_poll.ends, ends);
                 assert_eq!(fetched_poll.votes, 0);
-                fetched_poll
-                    .images
-                    .iter()
-                    .zip(images.iter())
-                    .for_each(|(f, i)| {
-                        assert_eq!(f, i);
-                    });
+                for image in images.iter() {
+                    assert!(fetched_poll.images.contains(image));
+                }
             }
 
             let fetched_polls = fetch_polls(&client, None).await.unwrap();
@@ -285,6 +291,7 @@ fn test_fetch_polls() -> turmoil::Result {
                     page: 1,
                     page_size: 2,
                     asc: true,
+                    sort_by: None,
                 }),
             )
             .await
@@ -300,6 +307,7 @@ fn test_fetch_polls() -> turmoil::Result {
                     page: 0,
                     page_size: 3,
                     asc: true,
+                    sort_by: None,
                 }),
             )
             .await
@@ -313,6 +321,7 @@ fn test_fetch_polls() -> turmoil::Result {
                     page: 0,
                     page_size: 3,
                     asc: false,
+                    sort_by: None,
                 }),
             )
             .await
@@ -323,6 +332,38 @@ fn test_fetch_polls() -> turmoil::Result {
                 assert_eq!(poll.ends, reversed_polls.polls[i].ends);
                 assert_eq!(poll.title, reversed_polls.polls[i].title);
             }
+
+            let sorted_by_title = fetch_polls(
+                &client,
+                Some(Paginator {
+                    page: 0,
+                    page_size: 3,
+                    asc: true,
+                    sort_by: Some(FetchPollSort::Title),
+                }),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(sorted_by_title.polls[0].title, "aaaaaaa-poll");
+            assert_eq!(sorted_by_title.polls[1].title, "fffffff-poll");
+            assert_eq!(sorted_by_title.polls[2].title, "zzzzzzz-poll");
+
+            let sorted_by_title = fetch_polls(
+                &client,
+                Some(Paginator {
+                    page: 0,
+                    page_size: 3,
+                    asc: false,
+                    sort_by: Some(FetchPollSort::Ends),
+                }),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(sorted_by_title.polls[0].ends, f64::MAX - 1.0);
+            assert_eq!(sorted_by_title.polls[1].ends, f64::MAX - 2.0);
+            assert_eq!(sorted_by_title.polls[2].ends, f64::MAX - 3.0);
 
             logout(&mut client).await.unwrap();
             login(&mut client, &logins()[1]).await.unwrap();
@@ -354,12 +395,12 @@ fn test_edit_poll() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let client = get_default_client().await.unwrap();
+            let client = get_client(0).await.0;
             let mut initial_images = Vec::new();
             let mut add_images = Vec::new();
 
             for (idx, image) in png_images().iter().take(5).enumerate() {
-                let uploaded = add_image(&client, image.to_vec(), "image/png")
+                let uploaded = add_image(&client, image, "image/png")
                     .await
                     .unwrap()
                     .name
@@ -380,8 +421,9 @@ fn test_edit_poll() -> turmoil::Result {
                     title: title.clone(),
                     info: "editing c:".to_string(),
                     ends: 0.0,
-                    images: initial_images.clone(),
+                    images: initial_images.iter().cloned().collect(),
                     allowed_votes: 1,
+                    group: None,
                 },
             )
             .await
@@ -404,8 +446,8 @@ fn test_edit_poll() -> turmoil::Result {
                 &poll.id,
                 EditPoll {
                     title: Some(title.clone()),
-                    add_images: Some(add_images.clone()),
-                    remove_images: Some(vec![initial_images[0].clone()]),
+                    add_images: Some(add_images.iter().cloned().collect()),
+                    remove_images: Some([initial_images[0].clone()].into()),
                     info: None,
                     ends: None,
                     allowed_votes: None,
@@ -417,8 +459,8 @@ fn test_edit_poll() -> turmoil::Result {
             let mut current_images = fetched_poll
                 .images
                 .iter()
-                .skip(1)
                 .cloned()
+                .filter(|i| *i != initial_images[0])
                 .collect::<Vec<_>>();
 
             current_images.append(&mut add_images.clone());
@@ -443,7 +485,7 @@ fn test_edit_poll() -> turmoil::Result {
                         ends: None,
                         allowed_votes: None,
                         add_images: None,
-                        remove_images: Some(current_images.clone())
+                        remove_images: Some(current_images.iter().cloned().collect())
                     }
                 )
                 .await
@@ -476,7 +518,7 @@ fn test_edit_poll() -> turmoil::Result {
                         info: None,
                         ends: None,
                         allowed_votes: None,
-                        add_images: Some(current_images.clone()),
+                        add_images: Some(current_images.iter().cloned().collect()),
                         remove_images: None,
                     }
                 )
@@ -497,7 +539,7 @@ fn test_poll_text_validation() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let client = get_default_client().await.unwrap();
+            let client = get_client(0).await.0;
 
             assert!(
                 add_poll(
@@ -506,8 +548,9 @@ fn test_poll_text_validation() -> turmoil::Result {
                         title: "Friendly poll".to_string(),
                         info: "<script>alert('xss')</script>".to_string(),
                         ends: 0.0,
-                        images: vec![],
+                        images: [].into(),
                         allowed_votes: 1,
+                        group: None,
                     }
                 )
                 .await
@@ -521,24 +564,25 @@ fn test_poll_text_validation() -> turmoil::Result {
                         title: "<script>alert('xss')</script>".to_string(),
                         info: "Very friendly poll, nothing to worry about here :)".to_string(),
                         ends: 0.0,
-                        images: vec![],
+                        images: [].into(),
                         allowed_votes: 1,
+                        group: None,
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            let mut images = Vec::new();
+            let mut images = HashSet::new();
 
             for image in png_images().iter().take(5) {
-                let uploaded = add_image(&client, image.to_vec(), "image/png")
+                let uploaded = add_image(&client, image, "image/png")
                     .await
                     .unwrap()
                     .name
                     .to_string();
 
-                images.push(uploaded);
+                images.insert(uploaded);
             }
 
             let poll = add_poll(
@@ -549,6 +593,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                     ends: 0.0,
                     images: images.clone(),
                     allowed_votes: 1,
+                    group: None,
                 },
             )
             .await
@@ -610,12 +655,12 @@ fn test_voting() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let client = get_default_client().await.unwrap();
-            let voter = get_client(1, true).await.unwrap().0;
+            let client = get_client(0).await.0;
+            let (mut voter, voter_id) = get_client(1).await;
 
             let mut images = Vec::new();
             for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image.to_vec(), mime)
+                let uploaded = add_image(&client, image, mime)
                     .await
                     .unwrap()
                     .name
@@ -630,19 +675,21 @@ fn test_voting() -> turmoil::Result {
                     title: "test".to_string(),
                     info: "some test poll".to_string(),
                     ends: 0.0,
-                    images: vec![images[0].clone(), images[1].clone()],
+                    images: [images[0].clone(), images[1].clone()].into(),
                     allowed_votes: 2,
+                    group: None,
                 },
             )
             .await
             .unwrap();
 
+            // voting period already over
             assert!(
                 vote(
                     &voter,
                     &old_poll.id,
                     Vote {
-                        votes: vec![images[0].clone(), images[1].clone()],
+                        votes: [images[0].clone(), images[1].clone()].into(),
                     }
                 )
                 .await
@@ -661,6 +708,7 @@ fn test_voting() -> turmoil::Result {
                     ends: f64::MAX,
                     images: images.iter().map(|i| i.to_string()).collect(),
                     allowed_votes: 2,
+                    group: None,
                 },
             )
             .await
@@ -677,42 +725,45 @@ fn test_voting() -> turmoil::Result {
                 assert!(fetched_poll.images.contains(image));
             }
 
+            // poll doesn't exist
             assert!(
                 vote(
                     &voter,
                     "abc",
                     Vote {
-                        votes: vec![images[0].clone()],
+                        votes: [images[0].clone()].into(),
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
 
+            // too many votes
             assert!(
                 vote(
                     &voter,
                     &poll.id,
                     Vote {
-                        votes: vec![images[0].clone(), images[1].clone(), images[2].clone()],
+                        votes: [images[0].clone(), images[1].clone(), images[2].clone()].into(),
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
+            // no votes
             assert!(
-                vote(&voter, &poll.id, Vote { votes: vec![] })
+                vote(&voter, &poll.id, Vote { votes: [].into() })
                     .await
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
+            // this one works
             vote(
                 &voter,
                 &poll.id,
                 Vote {
-                    votes: vec![images[0].clone(), images[1].clone(), images[1].clone()],
-                    // voting twice for the same image is ignored
+                    votes: [images[0].clone(), images[1].clone()].into(),
                 },
             )
             .await
@@ -731,27 +782,54 @@ fn test_voting() -> turmoil::Result {
             assert!(fetched_vote.votes.contains(&images[0]));
             assert!(fetched_vote.votes.contains(&images[1]));
 
+            // voting again
             assert!(
                 vote(
                     &voter,
                     &poll.id,
                     Vote {
-                        votes: vec![images[0].clone(), images[1].clone()],
+                        votes: [images[0].clone(), images[1].clone()].into(),
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
+            // we change our ip, but we still have the same cookie
+            voter.ip = "new-voter".to_string();
+            assert!(
+                vote(
+                    &voter,
+                    &poll.id,
+                    Vote {
+                        votes: [images[0].clone()].into()
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
+            );
+
+            // resetting the ip back to the "normal" one
+            voter.ip = voter_id;
+            vote(
+                &voter,
+                &poll.id,
+                Vote {
+                    votes: [images[0].clone()].into(),
+                },
+            )
+            .await
+            .unwrap_err();
+
             // we ditch the cookies, but we still have the same ip
-            let voter = get_client(1, true).await.unwrap().0;
+            let voter = get_client(1).await.0;
 
             assert!(
                 vote(
                     &voter,
                     &poll.id,
                     Vote {
-                        votes: vec![images[0].clone()]
+                        votes: [images[0].clone()].into()
                     }
                 )
                 .await
@@ -759,13 +837,13 @@ fn test_voting() -> turmoil::Result {
             );
 
             // we are someone completely else, so we can vote
-            let voter = get_client(2, true).await.unwrap().0;
+            let voter = get_client(2).await.0;
 
             vote(
                 &voter,
                 &poll.id,
                 Vote {
-                    votes: vec![images[0].clone()],
+                    votes: [images[0].clone()].into(),
                 },
             )
             .await
@@ -787,14 +865,15 @@ fn test_results() -> turmoil::Result {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
-            let client = get_default_client().await.unwrap();
-            let voter_1 = get_client(1, true).await.unwrap().0;
-            let voter_2 = get_client(2, true).await.unwrap().0;
-            let voter_3 = get_client(3, true).await.unwrap().0;
+            let client = get_client(0).await.0;
+            let voter_1 = get_client(1).await.0;
+            let voter_2 = get_client(2).await.0;
+            let voter_3 = get_client(3).await.0;
+            let voter_4 = get_client(4).await.0;
 
             let mut images = Vec::new();
             for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image.to_vec(), mime)
+                let uploaded = add_image(&client, image, mime)
                     .await
                     .unwrap()
                     .name
@@ -810,7 +889,8 @@ fn test_results() -> turmoil::Result {
                     info: "some test poll".to_string(),
                     ends: f64::MAX,
                     images: images.iter().map(|i| i.to_string()).collect(),
-                    allowed_votes: 3,
+                    allowed_votes: 4,
+                    group: None,
                 },
             )
             .await
@@ -820,7 +900,13 @@ fn test_results() -> turmoil::Result {
                 &voter_1,
                 &poll.id,
                 Vote {
-                    votes: vec![images[0].clone(), images[1].clone(), images[2].clone()],
+                    votes: [
+                        images[0].clone(),
+                        images[1].clone(),
+                        images[2].clone(),
+                        images[3].clone(),
+                    ]
+                    .into(),
                 },
             )
             .await
@@ -829,7 +915,7 @@ fn test_results() -> turmoil::Result {
                 &voter_2,
                 &poll.id,
                 Vote {
-                    votes: vec![images[1].clone(), images[2].clone()],
+                    votes: [images[0].clone(), images[1].clone(), images[2].clone()].into(),
                 },
             )
             .await
@@ -838,14 +924,23 @@ fn test_results() -> turmoil::Result {
                 &voter_3,
                 &poll.id,
                 Vote {
-                    votes: vec![images[2].clone()],
+                    votes: [images[0].clone(), images[1].clone()].into(),
+                },
+            )
+            .await
+            .unwrap();
+            vote(
+                &voter_4,
+                &poll.id,
+                Vote {
+                    votes: [images[0].clone()].into(),
                 },
             )
             .await
             .unwrap();
 
             let fetched_poll = fetch_poll(&client, &poll.id).await.unwrap();
-            assert_eq!(fetched_poll.votes, 6);
+            assert_eq!(fetched_poll.votes, 10);
 
             let results = fetch_results(&client, &poll.id).await.unwrap();
             assert!(results.ended == false);
@@ -884,14 +979,16 @@ fn test_results() -> turmoil::Result {
             assert!(results.ended == true);
             assert!(results.public == true);
             assert_eq!(results.votes.len(), images.len());
-            assert_eq!(*results.votes.get(images[0].as_str()).unwrap(), 1);
-            assert_eq!(*results.votes.get(images[1].as_str()).unwrap(), 2);
-            assert_eq!(*results.votes.get(images[2].as_str()).unwrap(), 3);
+            assert_eq!(*results.votes.get(images[0].as_str()).unwrap(), 4);
+            assert_eq!(*results.votes.get(images[1].as_str()).unwrap(), 3);
+            assert_eq!(*results.votes.get(images[2].as_str()).unwrap(), 2);
+            assert_eq!(*results.votes.get(images[3].as_str()).unwrap(), 1);
+            assert_eq!(*results.votes.get(images[4].as_str()).unwrap(), 0);
 
             let fetched_results = fetch_voting_results(&voter_1, &poll.id).await.unwrap();
-            assert_eq!(fetched_results.first, images[2]);
+            assert_eq!(fetched_results.first, images[0]);
             assert_eq!(fetched_results.second, images[1]);
-            assert_eq!(fetched_results.third, Some(images[0].clone()));
+            assert_eq!(fetched_results.third, Some(images[2].clone()));
             for image in images.iter().skip(3) {
                 assert!(fetched_results.remaining.contains(image));
             }
@@ -909,6 +1006,30 @@ fn test_results() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::FORBIDDEN))
             );
 
+            edit_poll(
+                &client,
+                &poll.id,
+                EditPoll {
+                    title: None,
+                    info: None,
+                    ends: None,
+                    allowed_votes: None,
+                    add_images: None,
+                    remove_images: Some([images[0].clone()].into()),
+                },
+            )
+            .await
+            .unwrap();
+
+            let results = fetch_results(&client, &poll.id).await.unwrap();
+            assert_eq!(results.votes.get(images[0].as_str()), None);
+            assert_eq!(*results.votes.get(images[1].as_str()).unwrap(), 3);
+            assert_eq!(*results.votes.get(images[2].as_str()).unwrap(), 2);
+            assert_eq!(*results.votes.get(images[3].as_str()).unwrap(), 1);
+            assert_eq!(*results.votes.get(images[4].as_str()).unwrap(), 0);
+
+            remove_poll(&client, &poll.id).await.unwrap();
+
             Ok(())
         });
 
@@ -925,6 +1046,7 @@ fn test_group_poll() -> turmoil::Result {
         sim.client("client", async move {
             // TODO
             // 0 creates a poll in the group, adds some of their own images to it
+            // 0 creates a poll outside the group, and adds it later
             // 1 and 2 should be able to fetch the images, and the poll
             // 1 and 2 should also be able to remove images from the poll, but calling remove directly on 0's images should not work
             // adding their own images should work

@@ -1,4 +1,3 @@
-use std::env;
 use std::future::Future;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
@@ -67,8 +66,7 @@ impl<'a> FlareSimulation<'a> {
         std::fs::create_dir(&path).expect("Failed to create dir");
 
         self.host(FLARE_SERVER, move || {
-            let base_url = env::var("DATABASE_BASE").expect("DATABASE_BASE must be set");
-            let db_url = format!("{}/flare-db-test", base_url);
+            let db_url = format!("{}/flare-db-test", env!("DATABASE_BASE"));
 
             let mut config = FlareConfig::default();
             config.store.storage.base_path = path.clone();
@@ -85,7 +83,7 @@ impl<'a> FlareSimulation<'a> {
         self.start_api();
 
         self.client("setup-client", async move {
-            let mut client = helpers::Http::new_with_cookies(true, None);
+            let mut client = helpers::Http::new_with_cookies(true, "setup-client".to_string());
             helpers::wait_for_api(&client).await;
 
             for login_info in helpers::logins() {
@@ -102,7 +100,7 @@ impl<'a> FlareSimulation<'a> {
     pub fn group_users(&mut self, group_name: &str, owner: usize, users: Vec<usize>) {
         let group_name = group_name.to_string();
         self.client("group-users-client", async move {
-            let (mut owner_client, _) = helpers::get_client(owner, false).await.unwrap();
+            let (mut owner_client, _) = helpers::get_client(owner).await;
 
             let group = helpers::add_group(&owner_client, AddGroup { name: group_name })
                 .await
@@ -111,7 +109,7 @@ impl<'a> FlareSimulation<'a> {
             helpers::refresh(&mut owner_client).await.unwrap();
 
             for user in users {
-                let (user_client, user_id) = helpers::get_client(user, true).await.unwrap();
+                let (user_client, user_id) = helpers::get_client(user).await;
 
                 helpers::add_group_user(&owner_client, &group.id, &user_id)
                     .await
@@ -127,6 +125,8 @@ impl<'a> FlareSimulation<'a> {
     }
 
     pub fn run(&mut self) -> Result {
+        // TODO there could be a run_to_end() that runs the sim, and once done attempts to delete all
+        // outstanding resources like polls, users, groups, in somewhat arbitrary order
         self.sim.run()
     }
 }

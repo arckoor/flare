@@ -14,6 +14,7 @@ use crate::store::Store;
 use super::error::RestError;
 
 const COOKIE_NAME: &str = "user-id";
+const ALGO_NAME: &str = "SHA-3(512)";
 
 #[derive(Clone, Debug)]
 pub struct InjectedEphemeralUser {
@@ -42,7 +43,12 @@ pub async fn set_tracking_cookie(
                 .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                 .map(|connect_info| connect_info.0.ip().to_string())
         })
-        .map(|ip| ip); // TODO hash this
+        .map(|ip| {
+            let mut hasher = botan::HashFunction::new(ALGO_NAME).unwrap();
+            hasher.update(ip.as_bytes()).unwrap();
+            let hash = hasher.finish().unwrap();
+            botan::hex_encode(&hash).unwrap()
+        });
 
     // TODO eph user needs a last_seen or similar for the cleanup task
     if let Some(ip) = ip {
