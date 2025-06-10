@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum_extra::{
     extract::CookieJar,
@@ -12,9 +16,12 @@ use sea_orm::entity::prelude::*;
 use secstr::{SecStr, SecUtf8};
 use serde::{Deserialize, Serialize};
 
-use crate::{api::error::RestError, config::JwtConfig, db::Database, store::Store};
+use crate::{api::error::RestError, config::JwtConfig, db::Database, time::now};
 
-#[derive(Debug, Serialize, Deserialize)]
+pub const REFRESH_TOKEN: &str = "refresh-token";
+pub const REFRESH_INDICATOR: &str = "refresh-indicator";
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AccessClaims {
     pub sub: String,
     pub permissions: Vec<Permissions>,
@@ -33,21 +40,41 @@ pub struct RefreshClaims {
 struct JWTSettings {
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
-    algorithm: Algorithm,
 }
 
 impl JWTSettings {
-    pub fn new(secret: &SecStr) -> Self {
-        // TODO should we periodically re-key?
-        let encoding_key = EncodingKey::from_secret(secret.unsecure());
-        let decoding_key = DecodingKey::from_secret(secret.unsecure());
-        let algorithm = Algorithm::HS512;
-
+    pub fn new(passphrase: &SecUtf8, path: &Path, name: &str) -> Self {
+        let (priv_, pub_) = Self::load_keys(passphrase, path, name).unwrap();
         Self {
-            encoding_key,
-            decoding_key,
-            algorithm,
+            encoding_key: EncodingKey::from_ed_pem(priv_.unsecure()).unwrap(),
+            decoding_key: DecodingKey::from_ed_pem(pub_.unsecure()).unwrap(),
         }
+    }
+
+    fn load_keys(
+        passphrase: &SecUtf8,
+        path: &Path,
+        name: &str,
+    ) -> Result<(SecStr, SecStr), RestError> {
+        let p = path.join(format!("{name}.key"));
+        if !std::fs::exists(&p)? {
+            Self::generate_keys(passphrase, path, name)?;
+        }
+        let pem = std::fs::read_to_string(p)?;
+        let prv = botan::Privkey::load_encrypted_pem(&pem, passphrase.unsecure())?;
+        Ok((
+            SecStr::new(prv.pem_encode()?.as_bytes().to_vec()),
+            SecStr::new(prv.pubkey()?.pem_encode()?.as_bytes().to_vec()),
+        ))
+    }
+
+    fn generate_keys(passphrase: &SecUtf8, path: &Path, name: &str) -> Result<(), RestError> {
+        let mut rng = botan::RandomNumberGenerator::new_system()?;
+        let prv = botan::Privkey::create("Ed25519", "", &mut rng)?
+            .pem_encode_encrypted(passphrase.unsecure(), &mut rng)?;
+        let path = path.join(format!("{name}.key"));
+        std::fs::write(path, prv)?;
+        Ok(())
     }
 }
 
@@ -62,14 +89,13 @@ pub struct Jwt {
 }
 
 impl Jwt {
-    const REFRESH_PREFIX: &'static str = "refresh";
+    const ALGO_NAME: Algorithm = Algorithm::EdDSA;
     const ACCESS_PREFIX: &'static str = "access";
-    pub const REFRESH_TOKEN: &'static str = "refresh-token";
-    pub const REFRESH_INDICATOR: &'static str = "refresh-indicator";
+    const REFRESH_PREFIX: &'static str = "refresh";
 
-    pub fn new(config: &JwtConfig, db: Arc<Database>) -> Self {
-        let access = JWTSettings::new(&config.access_secret);
-        let refresh = JWTSettings::new(&config.refresh_secret);
+    pub fn new(config: &JwtConfig, path: PathBuf, db: Arc<Database>) -> Self {
+        let access = JWTSettings::new(&config.access_passphrase, &path, "access");
+        let refresh = JWTSettings::new(&config.refresh_passphrase, &path, "refresh");
 
         Self {
             domain: config.domain.to_string(),
@@ -93,7 +119,7 @@ impl Jwt {
     }
 
     pub async fn refresh(&self, jar: CookieJar) -> Result<(SecUtf8, CookieJar), RestError> {
-        let refresh_token = match jar.get(Self::REFRESH_TOKEN) {
+        let refresh_token = match jar.get(REFRESH_TOKEN) {
             Some(token) => token.value(),
             None => return Err(RestError::unauthorized("No refresh token found")),
         };
@@ -101,7 +127,7 @@ impl Jwt {
         let claims = jsonwebtoken::decode::<RefreshClaims>(
             refresh_token,
             &self.refresh.decoding_key,
-            &Validation::new(self.refresh.algorithm),
+            &Validation::new(Self::ALGO_NAME),
         )
         .map_err(|_| RestError::unauthorized("Invalid token"))?
         .claims;
@@ -125,14 +151,14 @@ impl Jwt {
     }
 
     pub async fn revoke_refresh(&self, id: &str) -> Result<(), RestError> {
-        let (now, refresh_expiry) = self.generate_time(self.refresh_expiry)?;
+        let (now, refresh_expiry) = self.generate_time(self.refresh_expiry);
         self.set_nbf(Self::REFRESH_PREFIX, id, refresh_expiry, now + 120)
             .await?;
         Ok(())
     }
 
     pub async fn revoke_access(&self, id: &str) -> Result<(), RestError> {
-        let (now, access_expiry) = self.generate_time(self.access_expiry)?;
+        let (now, access_expiry) = self.generate_time(self.access_expiry);
         self.set_nbf(Self::ACCESS_PREFIX, id, access_expiry, now + 120)
             .await?;
         Ok(())
@@ -150,14 +176,15 @@ impl Jwt {
         Ok(jar)
     }
 
+    #[cfg(not(feature = "fuzz"))]
     pub async fn validate(
         &self,
         auth: Authorization<Bearer>,
-        permissions: Vec<Permissions>,
+        permissions: &[Permissions],
     ) -> Result<AccessClaims, RestError> {
         let claims = self.decode_access(auth.token()).await?;
         for permission in permissions {
-            if !claims.permissions.contains(&permission) {
+            if !claims.permissions.contains(permission) {
                 return Err(RestError::forbidden(format!(
                     "You are missing a required permission: {permission:?}"
                 )));
@@ -167,12 +194,34 @@ impl Jwt {
         Ok(claims)
     }
 
+    #[cfg(feature = "fuzz")]
+    pub async fn validate(
+        &self,
+        _auth: Authorization<Bearer>,
+        _permissions: &[Permissions],
+    ) -> Result<AccessClaims, RestError> {
+        use sea_orm::Iterable;
+
+        return Ok(AccessClaims {
+            sub: "fuzz".to_string(),
+            permissions: Permissions::iter().collect(),
+            groups: sea_entity::group_user::Entity::find()
+                .all(&self.db.sea)
+                .await?
+                .into_iter()
+                .map(|group| group.group_id)
+                .collect(),
+            exp: u64::MAX,
+            iat: 0,
+        });
+    }
+
     async fn generate_refresh_token(
         &self,
         user: &sea_entity::user::Model,
     ) -> Result<SecUtf8, RestError> {
-        let header = Header::new(self.refresh.algorithm);
-        let (now, expiration) = self.generate_time(self.refresh_expiry)?;
+        let header = Header::new(Self::ALGO_NAME);
+        let (now, expiration) = self.generate_time(self.refresh_expiry);
 
         let claims = RefreshClaims {
             sub: user.id.to_string(),
@@ -194,8 +243,8 @@ impl Jwt {
         &self,
         user: &sea_entity::user::Model,
     ) -> Result<SecUtf8, RestError> {
-        let header = Header::new(self.access.algorithm);
-        let (now, expiration) = self.generate_time(self.access_expiry)?;
+        let header = Header::new(Self::ALGO_NAME);
+        let (now, expiration) = self.generate_time(self.access_expiry);
 
         self.set_nbf(Self::ACCESS_PREFIX, &user.id, expiration, now)
             .await?;
@@ -203,8 +252,7 @@ impl Jwt {
         let groups = sea_entity::group_user::Entity::find()
             .filter(sea_entity::group_user::Column::UserId.contains(&user.id))
             .all(&self.db.sea)
-            .await
-            .map_err(|_| RestError::internal("Failed to get groups"))?
+            .await?
             .into_iter()
             .map(|group| group.group_id)
             .collect();
@@ -228,7 +276,7 @@ impl Jwt {
         let claims = jsonwebtoken::decode::<AccessClaims>(
             token,
             &self.access.decoding_key,
-            &Validation::new(self.access.algorithm),
+            &Validation::new(Self::ALGO_NAME),
         )
         .map_err(|_| RestError::unauthorized("Invalid token"))?
         .claims;
@@ -240,12 +288,12 @@ impl Jwt {
     }
 
     // TODO this could be an associated function
-    fn generate_time(&self, exp: Duration) -> Result<(u64, u64), RestError> {
-        let now = Store::now()?;
+    fn generate_time(&self, exp: Duration) -> (u64, u64) {
+        let now = now();
 
         let expiration = (now + exp).as_secs();
         let now = now.as_secs();
-        Ok((now, expiration))
+        (now, expiration)
     }
 
     // TODO we use this elsewhere, it doesn't really belong here
@@ -276,10 +324,10 @@ impl Jwt {
         token: &SecUtf8,
         expiry: f64,
     ) -> (Cookie<'static>, Cookie<'static>) {
-        let token = self.build_cookie(Self::REFRESH_TOKEN.to_string(), token, expiry, true);
+        let token = self.build_cookie(REFRESH_TOKEN.to_string(), token, expiry, true);
 
         let indicator = self.build_cookie(
-            Self::REFRESH_INDICATOR.to_string(),
+            REFRESH_INDICATOR.to_string(),
             &SecUtf8::from("true"),
             expiry,
             false,
@@ -298,7 +346,7 @@ impl Jwt {
     async fn get_nbf(&self, prefix: &str, id: &str) -> Result<Option<u64>, RestError> {
         let key = format!("jwt:{prefix}:{id}");
         self.db
-            .redis
+            .valkey
             .clone()
             .get(key)
             .await
@@ -319,7 +367,7 @@ impl Jwt {
         .as_secs();
 
         self.db
-            .redis
+            .valkey
             .clone()
             .set_ex::<_, _, ()>(key, nbf, expiry)
             .await
@@ -330,8 +378,6 @@ impl Jwt {
     async fn check_expiry(&self, prefix: &str, id: &str, iat: u64) -> Result<(), RestError> {
         let expiry = self.get_nbf(prefix, id).await?;
         if let Some(expiry) = expiry {
-            let expiry = Duration::from_secs(expiry);
-            let iat = Duration::from_secs(iat);
             if expiry > iat {
                 return Err(RestError::forbidden("Token has been revoked"));
             }

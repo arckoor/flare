@@ -58,7 +58,7 @@ impl OAuthProvider for GithubOAuth {
         &self.http_client
     }
 
-    fn key(&self) -> &'static str {
+    fn identifier(&self) -> &'static str {
         "discord"
     }
 
@@ -116,7 +116,11 @@ impl OAuthProvider for GithubOAuth {
         {
             warn!(
                 "{}",
-                format!("Failed to revoke {} access token for {}", self.key(), id)
+                format!(
+                    "Failed to revoke {} access token for {}",
+                    self.identifier(),
+                    id
+                )
             );
         }
 
@@ -132,7 +136,11 @@ impl OAuthProvider for GithubOAuth {
         {
             warn!(
                 "{}",
-                format!("Failed to revoke {} refresh token for {}", self.key(), id)
+                format!(
+                    "Failed to revoke {} refresh token for {}",
+                    self.identifier(),
+                    id
+                )
             );
         }
     }

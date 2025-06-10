@@ -51,7 +51,7 @@ impl OAuthProvider for DiscordOAuth {
         &self.http_client
     }
 
-    fn key(&self) -> &'static str {
+    fn identifier(&self) -> &'static str {
         "discord"
     }
 

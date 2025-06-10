@@ -7,14 +7,15 @@ Create polls for images.
 
 ## Development
 Using the [nix](https://nixos.org/download/) package manager is recommended.
-The provided [shell.nix](/shell.nix) file sets up all necessary development dependencies, as well as providing a few utility commands.
-If you are not using nix, you will need a `postgres` and a `redis` instance.
+The provided [flake.nix](/flake.nix) sets up all necessary development dependencies, as well as providing a few utility commands.
+You can use [nix-direnv](https://github.com/nix-community/nix-direnv), or use `nix develop` directly. Use `start-db` and `stop-db` to manage the databases.
+If you are not using nix, you will need a `postgres` and a `valkey` instance.
 For configuration options of those services, see the shell.nix file.
 
 ### Setup
-Copy [config.toml.example](/server/config.toml.example) and rename it to `config.toml`.
-Some entries already have defaults, others you will have to configure yourself.
-Cryptographically strong secrets for the JWT implementation can be generated using `botan rng --format=hex 64`.
+Copy [config.example.toml](/server/config.example.toml) and rename it to `config.toml`.
+Some entries already have sane defaults, others you will have to configure yourself.
+Cryptographically strong passphrases for the JWT implementation can be generated using `botan rng --format=hex 64`.
 
 #### Certificates and mTLS
 flare uses mTLS between itself and the exposing reverse proxy.

@@ -29,7 +29,7 @@ pub trait OAuthProvider: Send + Sync {
     fn new(config: &OAuthConfig, http_client: reqwest::Client) -> Self;
     fn client(&self) -> &OAuthClient;
     fn http_client(&self) -> &reqwest::Client;
-    fn key(&self) -> &'static str;
+    fn identifier(&self) -> &'static str;
     fn auth_url(&self, csrf: CsrfToken, challenge: PkceCodeChallenge) -> Url;
     fn callback(
         &self,
@@ -54,7 +54,11 @@ pub trait OAuthProvider: Send + Sync {
             {
                 warn!(
                     "{}",
-                    format!("Failed to revoke {} refresh token for {}", self.key(), id)
+                    format!(
+                        "Failed to revoke {} refresh token for {}",
+                        self.identifier(),
+                        id
+                    )
                 );
             }
 
@@ -68,7 +72,11 @@ pub trait OAuthProvider: Send + Sync {
             {
                 warn!(
                     "{}",
-                    format!("Failed to revoke {} access token for {}", self.key(), id)
+                    format!(
+                        "Failed to revoke {} access token for {}",
+                        self.identifier(),
+                        id
+                    )
                 );
             }
         }

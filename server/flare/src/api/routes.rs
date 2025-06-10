@@ -14,25 +14,33 @@ use axum_extra::{
     extract::CookieJar,
     headers::{Authorization, authorization::Bearer},
 };
-use hyper::{StatusCode, header};
+use hyper::{
+    StatusCode,
+    header::{self},
+};
 use rand::{rng, seq::SliceRandom};
-use sea_entity::sea_orm_active_enums::Permissions;
+use sea_entity::sea_orm_active_enums::{OauthProvider, Permissions};
 use sea_orm::{IntoActiveModel, QueryOrder, Set, TransactionTrait, entity::prelude::*};
 use sea_orm::{Iterable, JoinType, QuerySelect};
 use utoipa::OpenApi;
 
-use crate::{db::Database, store::Store};
+use crate::{
+    api::api_params::{IdString, UpdatedPoll},
+    crypto::Hasher,
+    db::Database,
+    store::Store,
+    time::now,
+};
 use crate::{requires, transaction, validate_text};
 
 use super::api_params::{
-    AddGroup, AddImage, AddPoll, AddedPoll, EditGroup, EditPoll, FetchPoll, FetchPollSort,
-    FetchPolls, FetchResults, FetchVote, FetchVoteResults, FetchVotingPoll, FileName, Group,
-    Member, OAuthCallback, OAuthLogin, PaginatedPoll, Paginator, PublishResults, TokenResponse,
-    UploadedImage, Vote,
+    AddGroup, AddImage, AddPoll, EditGroup, EditPoll, FetchGroup, FetchPoll, FetchPollSort,
+    FetchPolls, FetchResults, FetchVote, FetchVoteResults, FetchVotingPoll, FileName, Member,
+    OAuthCallback, OAuthLogin, PaginatedPoll, Paginator, PublishResults, TokenResponse,
+    UploadedImage, UserInfo, Vote,
 };
 use super::error::{FoundError, RestError};
-use super::middleware::InjectedEphemeralUser;
-use super::middleware::set_tracking_cookie;
+use super::middleware::{InjectedEphemeralUser, set_tracking_cookie};
 use super::openapi::ApiDoc;
 use super::services::{remove_file, serve_image};
 use super::validation::{inspect_validate_image, validate_paginator, validate_user_text};
@@ -42,14 +50,15 @@ use super::api_params::LoginInfo;
 
 pub fn build_router(state: Arc<Store>) -> Router {
     let router = Router::new()
-        // TODO users should be able to delete themselves
-        // would include removing their owned groups, polls, ..., and transferring polls in groups they don't own to the group owner
         .route("/ping", routing::get(ping))
         .route("/auth-ping", routing::get(auth_ping))
         .route("/oauth/{provider}/login", routing::get(oauth_login))
         .route("/oauth/{provider}/callback", routing::get(oauth_callback))
-        .route("/logout", routing::get(logout))
-        .route("/refresh", routing::get(refresh))
+        .route("/oauth/{provider}/unlink", routing::delete(oauth_unlink))
+        .route("/user", routing::get(user_info))
+        .route("/user", routing::delete(remove_user))
+        .route("/logout", routing::post(logout))
+        .route("/refresh", routing::post(refresh))
         .route(
             "/image",
             routing::post(add_image).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
@@ -72,11 +81,8 @@ pub fn build_router(state: Arc<Store>) -> Router {
         .route("/groups/{id}", routing::get(fetch_group))
         .route("/groups/{id}", routing::patch(edit_group))
         .route("/groups/{id}", routing::delete(remove_group))
-        .route("/groups/{id}/user/{user_id}", routing::post(add_group_user))
-        .route(
-            "/groups/{id}/user/{user_id}",
-            routing::delete(remove_group_user),
-        )
+        .route("/groups/{id}/{user_id}", routing::post(add_group_user))
+        .route("/groups/{id}/{user_id}", routing::delete(remove_group_user))
         .route(
             "/docs/openapi.json",
             routing::get(move || async { Json(ApiDoc::openapi()) }),
@@ -104,35 +110,30 @@ pub fn build_router(state: Arc<Store>) -> Router {
     );
 
     Router::new().nest("/api", router)
-
-    // TODO we have an api documentation, but no CORS
-    // let router = router.layer(
-    //     CorsLayer::new()
-    //         .allow_origin(vec!["https://localhost".parse::<HeaderValue>().unwrap()])
-    //         .allow_headers([axum::http::header::CONTENT_TYPE])
-    //         .allow_methods(["*".parse().unwrap()]), // .allow_credentials(true),
-    // );
 }
 
-#[cfg_attr(feature = "api-doc", utoipa::path(
+#[utoipa::path(
     get,
+    description = "Ping the api",
     path = "/api/ping",
     responses(
         (status = OK, description = "Pong"),
-    )
-))]
+    ),
+)]
 async fn ping() -> impl IntoResponse {
     "Pong"
 }
 
-#[cfg_attr(feature = "api-doc", utoipa::path(
+#[utoipa::path(
     get,
+    description = "Ping the api",
     path = "/api/auth-ping",
     responses(
         (status = OK, description = "Pong"),
         (status = UNAUTHORIZED, description = "Unauthorized"),
-    )
-))]
+    ),
+    security(("ac-base" = [])),
+)]
 async fn auth_ping(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
@@ -158,7 +159,9 @@ async fn login(
     } else {
         let user = sea_entity::user::ActiveModel {
             id: Set(login_info.id.clone()),
-            permissions: Set(vec![Permissions::ManageGroups, Permissions::ManagePolls]),
+            permissions: Set(Permissions::iter()
+                .filter(|&perm| perm != Permissions::Admin)
+                .collect()),
             ..Default::default()
         }
         .insert(&store.db.sea)
@@ -169,9 +172,23 @@ async fn login(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/oauth/{provider}/login",
+    description = "Login with an OAuth provider. If authentication is provided, link the OAuth account to your user",
+    tag = "oauth",
+    params(
+        ("provider" = OauthProvider, Path, description = "An OAuth provider"),
+        OAuthLogin,
+    ),
+    responses(
+        (status = FOUND, headers(("Location", description = "OAuth login url"))),
+    ),
+    security((), ("ac-base" = [])),
+)]
 async fn oauth_login(
     State(store): State<Arc<Store>>,
-    axum::extract::Path(provider): axum::extract::Path<String>,
+    axum::extract::Path(provider): axum::extract::Path<OauthProvider>,
     auth: Option<TypedHeader<Authorization<Bearer>>>,
     query: Result<Query<OAuthLogin>, QueryRejection>,
 ) -> Result<impl IntoResponse, FoundError> {
@@ -193,28 +210,40 @@ async fn oauth_login(
         Err(_) => return Err(FoundError::new(store.oauth.login_url(), "".to_string())),
     };
 
-    let url = match provider.as_str() {
-        "discord" => store
+    let url = match provider {
+        OauthProvider::Discord => store
             .oauth
             .discord
             .auth_url(redirect_uri, existing_user)
             .await?
             .to_string(),
-        "github" => store
+        OauthProvider::Github => store
             .oauth
             .github
             .auth_url(redirect_uri, existing_user)
             .await?
             .to_string(),
-        _ => return Err(FoundError::new(store.oauth.login_url(), "".to_string())),
     };
 
     Ok((StatusCode::FOUND, [(header::LOCATION, url.to_string())]))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/oauth/{provider}/callback",
+    description = "Callback used by OAuth providers",
+    tag = "oauth",
+    params(
+        ("provider" = OauthProvider, Path, description = "An OAuth provider"),
+        OAuthCallback,
+    ),
+    responses(
+        (status = FOUND, headers(("Location", description = "Redirect url"))),
+    ),
+)]
 async fn oauth_callback(
     State(store): State<Arc<Store>>,
-    axum::extract::Path(provider): axum::extract::Path<String>,
+    axum::extract::Path(provider): axum::extract::Path<OauthProvider>,
     query: Result<Query<OAuthCallback>, QueryRejection>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, FoundError> {
@@ -223,22 +252,9 @@ async fn oauth_callback(
         Err(_) => return Err(FoundError::new(store.oauth.login_url(), "".to_string())),
     };
 
-    let ((oauth_id, redirect_uri, existing_user), provider) = match provider.as_str() {
-        "discord" => (
-            store.oauth.discord.callback(code, state).await?,
-            sea_entity::sea_orm_active_enums::OauthProvider::Discord,
-        ),
-
-        "github" => (
-            store.oauth.github.callback(code, state).await?,
-            sea_entity::sea_orm_active_enums::OauthProvider::Github,
-        ),
-        _ => {
-            return Err(FoundError::new(
-                store.oauth.login_url(),
-                "Invalid provider".to_string(),
-            ));
-        }
+    let (oauth_id, redirect_uri, existing_user) = match provider {
+        OauthProvider::Discord => store.oauth.discord.callback(code, state).await?,
+        OauthProvider::Github => store.oauth.github.callback(code, state).await?,
     };
 
     let user = store
@@ -256,6 +272,158 @@ async fn oauth_callback(
     Ok((StatusCode::FOUND, [(header::LOCATION, redirect_uri)], jar))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/oauth/{provider}/unlink",
+    description = "Remove an OAuth account from your user",
+    tag = "oauth",
+    params(
+        ("provider" = OauthProvider, Path, description = "An OAuth provider"),
+    ),
+    responses(
+        (status = OK, description = "Account unlinked"),
+        (status = NOT_FOUND, description = "Account not found"),
+        (status = FORBIDDEN, description = "Unlinking not allowed"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn oauth_unlink(
+    State(store): State<Arc<Store>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    axum::extract::Path(provider): axum::extract::Path<OauthProvider>,
+) -> Result<impl IntoResponse, RestError> {
+    let claims = requires!(store, auth)?;
+
+    let connections = sea_entity::o_auth_user::Entity::find()
+        .filter(sea_entity::o_auth_user::Column::UserId.eq(&claims.sub))
+        .all(&store.db.sea)
+        .await?;
+
+    if !connections.iter().any(|model| model.provider == provider) {
+        return Err(RestError::not_found("Connected account not found"));
+    }
+
+    if connections.len() == 1 {
+        return Err(RestError::forbidden("Cannot remove only connection"));
+    }
+
+    sea_entity::o_auth_user::Entity::delete_by_id((claims.sub.clone(), provider))
+        .exec(&store.db.sea)
+        .await?;
+
+    store.jwt.revoke_access(&claims.sub).await?;
+
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/user",
+    description = "Retrieve info about yourself",
+    tag = "auth",
+    responses(
+        (status = OK, body = UserInfo),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn user_info(
+    State(store): State<Arc<Store>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<impl IntoResponse, RestError> {
+    let claims = requires!(store, auth)?;
+
+    let logins = sea_entity::o_auth_user::Entity::find()
+        .filter(sea_entity::o_auth_user::Column::UserId.eq(&claims.sub))
+        .all(&store.db.sea)
+        .await?
+        .into_iter()
+        .map(|model| (model.provider, model.provider_user_id))
+        .collect();
+
+    Ok(Json(UserInfo { logins }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/user",
+    description = "Delete your account",
+    tag = "auth",
+    responses(
+        (status = OK, description = "Account removed"),
+        (status = FORBIDDEN, description = "Account removal not allowed")
+    ),
+    security(("ac-base" = [])),
+)]
+async fn remove_user(
+    State(store): State<Arc<Store>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, RestError> {
+    let claims = requires!(store, auth)?;
+
+    if claims.permissions.contains(&Permissions::Admin) {
+        return Err(RestError::forbidden("You cannot delete your account"));
+    }
+
+    if sea_entity::group::Entity::find()
+        .filter(sea_entity::group::Column::OwnerId.eq(&claims.sub))
+        .count(&store.db.sea)
+        .await?
+        != 0
+    {
+        return Err(RestError::forbidden(
+            "You have owned groups, transfer or delete them",
+        ));
+    }
+
+    let polls = sea_entity::poll::Entity::find()
+        .filter(sea_entity::poll::Column::OwnerId.eq(&claims.sub))
+        .all(&store.db.sea)
+        .await?;
+
+    let user_id = claims.sub.clone();
+    let images = transaction!(&store.db.sea, txn, {
+        let images = sea_entity::image::Entity::delete_many()
+            .filter(sea_entity::image::Column::OwnerId.eq(&user_id))
+            .exec_with_returning(txn)
+            .await?
+            .into_iter()
+            .map(|image| image.id)
+            .collect::<Vec<_>>();
+
+        for poll in polls {
+            sea_entity::poll::Entity::delete_by_id(&poll.id)
+                .exec(txn)
+                .await?;
+        }
+
+        sea_entity::user::Entity::delete_by_id(&user_id)
+            .exec(txn)
+            .await?;
+
+        Ok(images)
+    })?;
+
+    for image in images {
+        let path = store.image_path.join(&image);
+        remove_file(&path, &image).await;
+    }
+
+    let jar = store.jwt.revoke(&claims.sub, jar).await?;
+
+    Ok((StatusCode::NO_CONTENT, jar))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/logout",
+    description = "Logout from the service",
+    tag = "auth",
+    responses(
+        (status = NO_CONTENT, description = "Logged out"),
+    ),
+    security(("ac-base" = []))
+)]
 async fn logout(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
@@ -267,6 +435,16 @@ async fn logout(
     Ok((StatusCode::NO_CONTENT, jar))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/refresh",
+    description = "Refresh your access and refresh tokens",
+    tag = "auth",
+    responses(
+        (status = OK, body = TokenResponse, description = "Session refreshed"),
+    ),
+    security(("ac-refresh" = [])),
+)]
 async fn refresh(
     State(store): State<Arc<Store>>,
     jar: CookieJar,
@@ -275,23 +453,24 @@ async fn refresh(
     Ok((jar, Json(TokenResponse { access })))
 }
 
-#[cfg_attr(feature = "api-doc", utoipa::path(
+#[utoipa::path(
     post,
     path = "/api/image",
+    description = "Upload an image",
+    tag = "images",
     request_body(content = inline(AddImage), description = "Multipart file", content_type = "multipart/form-data"),
     responses(
         (status = OK, body = UploadedImage, description = "Image uploaded"),
         (status = BAD_REQUEST, description = "Invalid content type or no file provided"),
-        (status = INTERNAL_SERVER_ERROR, description = "Failed to create image or error executing query"),
     ),
-    security(("bearer-auth" = []))
-))]
+    security(("ac-base" = [])),
+)]
 async fn add_image(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = requires!(store, auth, Permissions::ManagePolls)?;
+    let claims = requires!(store, auth)?;
 
     let Some(field) = multipart
         .next_field()
@@ -322,53 +501,63 @@ async fn add_image(
         .map_err(|_| RestError::bad_req("Failed to read field"))?;
 
     let aspect_ratio = inspect_validate_image(&data, &content_type)?;
+    let hash = Hasher::hash(&data)?;
 
     let filename = format!("{}.{}", cuid2::create_id(), extension);
     let path = store.image_path.join(&filename);
 
-    let mut file = tokio::fs::File::create_new(&path)
-        .await
-        .map_err(|_| RestError::internal("Failed to create file"))?;
+    transaction!(&store.db.sea, txn, {
+        let mut file = tokio::fs::File::create_new(&path).await?;
 
-    tokio::io::copy(&mut &*data, &mut file)
-        .await
-        .map_err(|_| RestError::internal("Failed to write to file"))?;
+        tokio::io::copy(&mut &*data, &mut file).await?;
 
-    sea_entity::image::ActiveModel {
-        id: Set(filename.clone()),
-        aspect_ratio: Set(aspect_ratio),
-        mime: Set(content_type.to_string()),
-        user_id: Set(claims.sub.clone()),
-        ..Default::default()
-    }
-    .insert(&store.db.sea)
-    .await?;
+        sea_entity::image::ActiveModel {
+            id: Set(filename.clone()),
+            aspect_ratio: Set(aspect_ratio),
+            mime: Set(content_type.to_string()),
+            hash: Set(hash),
+            owner_id: Set(Some(claims.sub.clone())),
+            ..Default::default()
+        }
+        .insert(txn)
+        .await?;
 
-    Ok(Json(UploadedImage { name: filename }))
+        Ok(Json(UploadedImage { name: filename }))
+    })
 }
 
-pub async fn fetch_image(
+#[utoipa::path(
+    get,
+    path = "/api/image/{name}",
+    description = "Retrieve an image",
+    tag = "images",
+    params(
+        ("name" = FileName, Path, description = "Name of the image")
+    ),
+    responses(
+        (status = OK, body = [u8], description = "The requested image"),
+        (status = NOT_FOUND, description = "Image not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn fetch_image(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     axum::extract::Path(name): axum::extract::Path<FileName>,
     request: axum::http::Request<Body>,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = requires!(store, auth, Permissions::ManagePolls)?;
-    let image = sea_entity::image::Entity::find()
-        .filter(sea_entity::image::Column::Id.eq(&name.0))
-        .find_also_related(sea_entity::poll::Entity)
+    let claims = requires!(store, auth)?;
+
+    let image = sea_entity::image::Entity::find_by_id(&name.0)
         .one(&store.db.sea)
         .await?;
 
-    let Some((image, poll)) = image else {
+    let Some(image) = image else {
         return Err(RestError::not_found("Image not found"));
     };
 
-    if !(image.user_id == claims.sub
-        || poll
-            .as_ref()
-            .and_then(|p| p.group_id.clone())
-            .is_some_and(|group_id| claims.groups.contains(&group_id)))
+    if !(image.owner_id.is_some_and(|id| id == claims.sub)
+        || image.group_id.is_some_and(|id| claims.groups.contains(&id)))
     {
         return Err(RestError::not_found("Image not found"));
     }
@@ -376,19 +565,29 @@ pub async fn fetch_image(
     serve_image(store, name, image.mime, request).await
 }
 
-pub async fn remove_image(
+#[utoipa::path(
+    delete,
+    path = "/api/image/{name}",
+    description = "Remove an image",
+    tag = "images",
+    params(
+        ("name" = FileName, Path, description = "Name of the image")
+    ),
+    responses(
+        (status = OK, description = "Image removed"),
+        (status = NOT_FOUND, description = "Image not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn remove_image(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     axum::extract::Path(name): axum::extract::Path<FileName>,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = requires!(store, auth, Permissions::ManagePolls)?;
+    let claims = requires!(store, auth)?;
 
-    let image = sea_entity::image::Entity::find()
-        .filter(
-            sea_orm::Condition::all()
-                .add(sea_entity::image::Column::Id.eq(&name.0))
-                .add(sea_entity::image::Column::UserId.eq(&claims.sub)),
-        )
+    let image = sea_entity::image::Entity::find_by_id(&name.0)
+        .filter(sea_entity::image::Column::OwnerId.eq(&claims.sub))
         .find_also_related(sea_entity::poll::Entity)
         .one(&store.db.sea)
         .await?;
@@ -401,9 +600,19 @@ pub async fn remove_image(
         return Err(RestError::forbidden("Image is in use"));
     }
 
-    sea_entity::image::Entity::delete_by_id(&name.0)
-        .exec(&store.db.sea)
-        .await?;
+    let image_id = name.0.clone();
+    transaction!(&store.db.sea, txn, {
+        let res = sea_entity::image::Entity::delete_by_id(&image_id)
+            .filter(sea_entity::image::Column::PollId.is_null())
+            .exec(txn)
+            .await?;
+
+        if res.rows_affected != 1 {
+            return Err(RestError::conflict("Image was modified"));
+        }
+
+        Ok(())
+    })?;
 
     let path = store.image_path.join(&name);
     remove_file(&path, &name).await;
@@ -411,13 +620,51 @@ pub async fn remove_image(
     Ok(())
 }
 
-pub async fn fetch_polls(
+// utoipa makes (Option<T>, Path) parameters required, so we're stuck with this
+#[utoipa::path(
+    get,
+    path = "/api/polls",
+    description = "Fetch a number of polls",
+    tag = "polls",
+    params(
+        ("page" = Option<u64>, Query, minimum = 0),
+        ("page_size"  = Option<u64>, Query, minimum = 0),
+        ("asc" = Option<bool>, Query),
+        ("sort_by" = Option<FetchPollSort>, Query)
+    ),
+    responses(
+        (status = OK, body = FetchPolls, description = "The requested polls"),
+        (status = BAD_REQUEST, description = "Bag paginator options provided"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn _fetch_polls() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/polls/{group_id}",
+    description = "Fetch a number of polls",
+    tag = "polls",
+    params(
+        ("group_id" = String, Path, description = "Group id to filter by"),
+        ("page" = Option<u64>, Query, minimum = 0),
+        ("page_size"  = Option<u64>, Query, minimum = 0),
+        ("asc" = Option<bool>, Query),
+        ("sort_by" = Option<FetchPollSort>, Query)
+    ),
+    responses(
+        (status = OK, body = FetchPolls, description = "The requested polls"),
+        (status = BAD_REQUEST, description = "Bag paginator options provided"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn fetch_polls(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    group_id: Option<axum::extract::Path<String>>,
     Query(paginator): Query<Paginator<FetchPollSort>>,
+    group_id: Option<axum::extract::Path<String>>,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = requires!(store, auth, Permissions::ManagePolls)?;
+    let claims = requires!(store, auth)?;
 
     // TODO would be cool to be able to filter by no-groups, e.g. "private" polls too
 
@@ -474,7 +721,19 @@ pub async fn fetch_polls(
     }))
 }
 
-pub async fn add_poll(
+#[utoipa::path(
+    post,
+    path = "/api/poll",
+    description = "Add a poll",
+    tag = "polls",
+    request_body(content = AddPoll),
+    responses(
+        (status = OK, body = FetchPoll, description = "Poll created"),
+        (status = BAD_REQUEST, description = "Bad options provided"),
+    ),
+    security(("ac-manage-polls" = [])),
+)]
+async fn add_poll(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     Json(add_poll): Json<AddPoll>,
@@ -495,6 +754,12 @@ pub async fn add_poll(
         _ => {}
     }
 
+    if let Some(group) = &add_poll.group {
+        if !claims.groups.contains(group) {
+            return Err(RestError::not_found("Group not found"));
+        }
+    }
+
     // TODO ends should probably be positive, also for edit_poll
 
     let short_link = cuid2::slug();
@@ -509,49 +774,97 @@ pub async fn add_poll(
                 .allowed_votes
                 .try_into()
                 .map_err(|_| RestError::bad_req("Invalid allowed votes"))?),
-            // todo maybe if we add to a group, just own it to the group owner instead
-            owner_id: Set(claims.sub.clone()),
-            // todo need to find the group!!!!!!!!!!!!!
-            group_id: Set(add_poll.group),
+            owner_id: Set(if add_poll.group.is_some() {
+                None
+            } else {
+                Some(claims.sub.clone())
+            }),
+            group_id: Set(add_poll.group.clone()),
             ..Default::default()
         }
         .insert(txn)
         .await?;
 
-        let res = sea_entity::image::Entity::update_many()
-            .col_expr(
+        // todo if the poll belongs to a group, the images need to too!
+        let images = {
+            let mut stmt = sea_entity::image::Entity::update_many().col_expr(
                 sea_entity::image::Column::PollId,
                 Expr::value(poll.id.clone()),
-            )
-            .filter(
-                sea_orm::Condition::all()
-                    .add(sea_entity::image::Column::Id.is_in(add_poll.images.clone()))
-                    .add(sea_entity::image::Column::UserId.eq(claims.sub.clone()))
-                    .add(sea_entity::image::Column::PollId.is_null()),
-            )
-            .exec(txn)
-            .await?;
+            );
+            if let Some(group_id) = add_poll.group {
+                // todo this sucks make extra call in Database:: or smth
+                stmt = stmt
+                    .col_expr(
+                        sea_entity::image::Column::OwnerId,
+                        Expr::value(None::<String>),
+                    )
+                    .col_expr(
+                        sea_entity::image::Column::GroupId,
+                        Expr::value(Some(group_id.clone())),
+                    );
+            }
 
-        if res.rows_affected != add_poll.images.len() as u64 {
+            stmt
+        }
+        .filter(
+            sea_orm::Condition::all()
+                .add(sea_entity::image::Column::Id.is_in(add_poll.images.clone()))
+                .add(sea_entity::image::Column::OwnerId.eq(claims.sub.clone()))
+                .add(sea_entity::image::Column::PollId.is_null()),
+        )
+        .exec_with_returning(txn)
+        .await?;
+
+        if images.len() != add_poll.images.len() {
             return Err(RestError::bad_req("Invalid images"));
         }
 
-        Ok(Json(AddedPoll { id: poll.id }))
+        let aspect_ratios = images
+            .iter()
+            .map(|image| (image.id.clone(), image.aspect_ratio.clone()))
+            .collect();
+
+        Ok(Json(FetchPoll {
+            id: poll.id,
+            title: poll.title,
+            info: poll.info,
+            ends: poll.ends,
+            allowed_votes: poll.allowed_votes as u32,
+            votes: 0,
+            images: images.into_iter().map(|image| image.id).collect(),
+            aspect_ratios,
+            group: poll.group_id,
+            updated_at: poll.updated_at,
+        }))
     })
 }
 
-pub async fn fetch_poll(
+#[utoipa::path(
+    get,
+    path = "/api/poll/{id}",
+    description = "Fetch a poll",
+    tag = "polls",
+    params(
+        ("id" = IdString, Path, description = "The poll id")
+    ),
+    responses(
+        (status = OK, body = FetchPoll, description = "The requested poll"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn fetch_poll(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = requires!(store, auth, Permissions::ManagePolls)?;
+    let claims = requires!(store, auth)?;
 
-    let poll = sea_entity::poll::Entity::find()
-        .filter(Database::filter_poll_by_id(
-            &id,
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
+        .filter(Database::filter_polls(
             &claims.sub,
             claims.groups.clone(),
+            None,
         ))
         .one(&store.db.sea)
         .await?;
@@ -588,23 +901,40 @@ pub async fn fetch_poll(
         aspect_ratios,
         votes,
         group: poll.group_id,
+        updated_at: poll.updated_at,
     }))
 }
 
-pub async fn edit_poll(
+#[utoipa::path(
+    patch,
+    path = "/api/poll/{id}",
+    description = "Edit a poll",
+    tag = "polls",
+    params(
+        ("id" = IdString, Path, description = "The poll id")
+    ),
+    request_body(content = EditPoll, description = "The fields to change"),
+    responses(
+        (status = OK, body = FetchPoll, description = "The updated poll"),
+        (status = BAD_REQUEST, description = "Bad options provided"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+    security(("ac-manage-polls" = [])),
+)]
+async fn edit_poll(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
     Json(edit_poll): Json<EditPoll>,
 ) -> Result<impl IntoResponse, RestError> {
     // TODO this function is too long.
     let claims = requires!(store, auth, Permissions::ManagePolls)?;
 
-    let poll = sea_entity::poll::Entity::find()
-        .filter(Database::filter_poll_by_id(
-            &id,
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
+        .filter(Database::filter_polls(
             &claims.sub,
             claims.groups.clone(),
+            None,
         ))
         .find_with_related(sea_entity::image::Entity)
         .all(&store.db.sea)
@@ -613,6 +943,10 @@ pub async fn edit_poll(
     let Some((poll, current_images)) = poll.into_iter().next() else {
         return Err(RestError::not_found("Poll not found"));
     };
+
+    if poll.locked {
+        return Err(RestError::forbidden("Poll is locked"));
+    }
 
     let new_image_count = (current_images.len() as u64)
         .saturating_add(edit_poll.add_images.as_ref().map_or(0, |x| x.len() as u64))
@@ -634,9 +968,13 @@ pub async fn edit_poll(
     }
 
     let remove_images = edit_poll.remove_images.clone();
+    let poll_id = poll.id.clone();
+    let group_id = poll.group_id.clone();
 
-    transaction!(&store.db.sea, txn, {
+    let poll = transaction!(&store.db.sea, txn, {
         let mut poll = poll.into_active_model();
+
+        poll.title.reset();
 
         if let Some(title) = edit_poll.title {
             validate_text!(&title);
@@ -657,16 +995,32 @@ pub async fn edit_poll(
         }
 
         if let Some(add_images) = edit_poll.add_images {
-            let res = sea_entity::image::Entity::update_many()
-                .col_expr(sea_entity::image::Column::PollId, Expr::value(id.clone()))
-                .filter(
-                    sea_orm::Condition::all()
-                        .add(sea_entity::image::Column::Id.is_in(add_images.clone()))
-                        .add(sea_entity::image::Column::UserId.eq(claims.sub.clone()))
-                        .add(sea_entity::image::Column::PollId.is_null()),
-                )
-                .exec(txn)
-                .await?;
+            let res = {
+                let mut stmt = sea_entity::image::Entity::update_many()
+                    .col_expr(sea_entity::image::Column::PollId, Expr::value(id.0.clone()));
+
+                if let Some(group_id) = group_id {
+                    stmt = stmt
+                        .col_expr(
+                            sea_entity::image::Column::OwnerId,
+                            Expr::value(None::<String>),
+                        )
+                        .col_expr(
+                            sea_entity::image::Column::GroupId,
+                            Expr::value(Some(group_id.clone())),
+                        );
+                }
+
+                stmt
+            }
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sea_entity::image::Column::Id.is_in(add_images.clone()))
+                    .add(sea_entity::image::Column::OwnerId.eq(claims.sub.clone()))
+                    .add(sea_entity::image::Column::PollId.is_null()),
+            )
+            .exec(txn)
+            .await?;
 
             if res.rows_affected != add_images.len() as u64 {
                 return Err(RestError::bad_req("Invalid add images"));
@@ -678,7 +1032,7 @@ pub async fn edit_poll(
                 .filter(
                     sea_orm::Condition::all()
                         .add(sea_entity::image::Column::Id.is_in(remove_images.clone()))
-                        .add(sea_entity::image::Column::PollId.eq(id.clone())),
+                        .add(sea_entity::image::Column::PollId.eq(id.0.clone())),
                 )
                 .exec(txn)
                 .await?;
@@ -690,7 +1044,7 @@ pub async fn edit_poll(
 
         // Todo is this check really necessary?
         let images = sea_entity::image::Entity::find()
-            .filter(sea_entity::image::Column::PollId.eq(&id))
+            .filter(sea_entity::image::Column::PollId.eq(&id.0))
             .all(txn)
             .await?;
 
@@ -698,9 +1052,23 @@ pub async fn edit_poll(
             return Err(RestError::bad_req("Invalid image count"));
         }
 
-        poll.update(txn).await?;
+        let polls = sea_entity::poll::Entity::update_many()
+            .set(poll)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sea_entity::poll::Column::Id.eq(poll_id))
+                    .add(sea_entity::poll::Column::UpdatedAt.eq(edit_poll.updated_at)),
+            )
+            .exec_with_returning(txn)
+            .await?;
 
-        Ok(())
+        if polls.len() != 1 {
+            return Err(RestError::conflict("Poll was modified"));
+        }
+
+        let poll = polls.into_iter().next().unwrap();
+
+        Ok(poll)
     })?;
 
     if let Some(remove_images) = edit_poll.remove_images {
@@ -710,21 +1078,64 @@ pub async fn edit_poll(
         }
     }
 
-    Ok(())
+    let images = sea_entity::image::Entity::find()
+        .filter(sea_entity::image::Column::PollId.eq(&poll.id))
+        .find_with_related(sea_entity::vote::Entity)
+        .all(&store.db.sea)
+        .await?;
+
+    let votes = images.iter().fold(0, |acc, (_, votes)| acc + votes.len()) as u64;
+
+    let images = images
+        .into_iter()
+        .map(|(image, _)| image)
+        .collect::<Vec<_>>();
+
+    let aspect_ratios = images
+        .iter()
+        .map(|image| (image.id.clone(), image.aspect_ratio.clone()))
+        .collect();
+
+    Ok(Json(FetchPoll {
+        id: poll.id,
+        title: poll.title,
+        info: poll.info,
+        ends: poll.ends,
+        allowed_votes: poll.allowed_votes as u32,
+        votes,
+        images: images.into_iter().map(|image| image.id).collect(),
+        aspect_ratios,
+        group: poll.group_id,
+        updated_at: poll.updated_at,
+    }))
 }
 
-pub async fn remove_poll(
+#[utoipa::path(
+    delete,
+    path = "/api/poll/{id}",
+    description = "Remove a poll",
+    tag = "polls",
+    params(
+        ("id" = IdString, Path, description = "The poll id")
+    ),
+    responses(
+        (status = OK, description = "Poll deleted"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+    security(("ac-manage-polls" = [])),
+)]
+async fn remove_poll(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManagePolls)?;
 
-    let poll = sea_entity::poll::Entity::find()
-        .filter(Database::filter_poll_by_id(
-            &id,
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
+        .filter(Database::filter_polls(
             &claims.sub,
             claims.groups.clone(),
+            None,
         ))
         .one(&store.db.sea)
         .await?;
@@ -734,20 +1145,15 @@ pub async fn remove_poll(
     }
 
     let poll_images = transaction!(&store.db.sea, txn, {
-        let poll_images = sea_entity::image::Entity::find()
-            .filter(sea_entity::image::Column::PollId.eq(&id))
-            .all(txn)
+        let poll_images = sea_entity::image::Entity::delete_many()
+            .filter(sea_entity::image::Column::PollId.eq(&id.0))
+            .exec_with_returning(txn)
             .await?
             .into_iter()
             .map(|image| image.id)
             .collect::<Vec<_>>();
 
-        sea_entity::image::Entity::delete_many()
-            .filter(sea_entity::image::Column::PollId.eq(&id))
-            .exec(txn)
-            .await?;
-
-        sea_entity::poll::Entity::delete_by_id(&id)
+        sea_entity::poll::Entity::delete_by_id(&id.0)
             .exec(txn)
             .await?;
 
@@ -762,19 +1168,31 @@ pub async fn remove_poll(
     Ok(())
 }
 
-pub async fn add_poll_to_group(
+#[utoipa::path(
+    patch,
+    path = "/api/poll/{id}/{group_id}",
+    description = "Add a poll to a group",
+    tag = "polls",
+    params(
+        ("id" = IdString, Path, description = "The poll id"),
+        ("group_id" = IdString, Path, description = "The group id"),
+    ),
+    responses(
+        (status = OK, body = UpdatedPoll, description = "Updated poll"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+    security(("ac-manage-polls" = [])),
+)]
+async fn add_poll_to_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path((id, group_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((id, group_id)): axum::extract::Path<(IdString, IdString)>,
+    Json(updated_poll): Json<UpdatedPoll>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManagePolls)?;
 
-    let poll = sea_entity::poll::Entity::find()
-        .filter(Database::filter_poll_by_id(
-            &id,
-            &claims.sub,
-            claims.groups.clone(),
-        ))
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
+        .filter(Database::filter_polls(&claims.sub, vec![], None))
         .one(&store.db.sea)
         .await?;
 
@@ -782,45 +1200,85 @@ pub async fn add_poll_to_group(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    if poll.group_id.is_some() {
-        return Err(RestError::bad_req("Poll already in a group"));
-    }
+    let group_user =
+        sea_entity::group_user::Entity::find_by_id((group_id.0.clone(), claims.sub.clone()))
+            .one(&store.db.sea)
+            .await?;
 
-    let group = sea_entity::group::Entity::find()
-        .filter(
-            sea_orm::query::Condition::all()
-                .add(Database::filter_group_user(&id, &claims.sub))
-                .add(sea_entity::group_user::Column::UserId.eq(&claims.sub)),
-        )
-        .find_also_related(sea_entity::group_user::Entity)
-        .one(&store.db.sea)
-        .await?;
-
-    let Some((_, Some(_))) = group else {
+    if group_user.is_none() {
         return Err(RestError::not_found("Group not found"));
     };
 
-    let mut poll = poll.into_active_model();
-    poll.group_id = Set(Some(group_id));
-    poll.save(&store.db.sea).await?;
+    transaction!(&store.db.sea, txn, {
+        sea_entity::image::Entity::update_many()
+            .col_expr(
+                sea_entity::image::Column::OwnerId,
+                Expr::value(None::<String>),
+            )
+            .col_expr(
+                sea_entity::image::Column::GroupId,
+                Expr::value(Some(group_id.0.clone())),
+            )
+            .filter(sea_entity::image::Column::PollId.eq(&id.0))
+            .exec(txn)
+            .await?;
 
-    Ok(())
+        let mut poll = poll.into_active_model();
+        poll.owner_id = Set(None);
+        poll.group_id = Set(Some(group_id.0));
+
+        let polls = sea_entity::poll::Entity::update_many()
+            .set(poll)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sea_entity::poll::Column::Id.eq(id.0))
+                    .add(sea_entity::poll::Column::UpdatedAt.eq(updated_poll.updated_at)),
+            )
+            .exec_with_returning(txn)
+            .await?;
+
+        // todo if the poll belongs to a group, the images need to too!
+
+        if polls.len() != 1 {
+            return Err(RestError::conflict("Poll was modified"));
+        }
+
+        let poll = polls.into_iter().next().unwrap();
+
+        Ok(Json(UpdatedPoll {
+            updated_at: poll.updated_at,
+        }))
+    })
 }
 
-pub async fn fetch_results(
+#[utoipa::path(
+    get,
+    path = "/api/poll/{id}/results",
+    description = "Fetch results for a poll",
+    tag = "polls",
+    params(
+        ("id" = IdString, Path, description = "The poll id"),
+    ),
+    responses(
+        (status = OK, body = FetchResults, description = "Poll results"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn fetch_results(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
-    let claims = requires!(store, auth, Permissions::ManagePolls)?;
+    let claims = requires!(store, auth)?;
 
     // TODO this can be much more extensive, e.g. histograms, ...
 
-    let poll = sea_entity::poll::Entity::find()
-        .filter(Database::filter_poll_by_id(
-            &id,
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
+        .filter(Database::filter_polls(
             &claims.sub,
             claims.groups.clone(),
+            None,
         ))
         .one(&store.db.sea)
         .await?;
@@ -829,7 +1287,7 @@ pub async fn fetch_results(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = Store::now()?.as_secs_f64();
+    let now = now().as_secs_f64();
 
     let images = sea_entity::image::Entity::find()
         .filter(sea_entity::image::Column::PollId.eq(&poll.id))
@@ -851,22 +1309,38 @@ pub async fn fetch_results(
         votes: results,
         public: poll.results_public,
         ended: poll.ends < now,
+        updated_at: poll.updated_at,
     }))
 }
 
-pub async fn publish_results(
+#[utoipa::path(
+    post,
+    path = "/api/poll/{id}/results",
+    description = "(Un-)Publish the results for a poll",
+    tag = "polls",
+    params(
+        ("id" = IdString, Path, description = "The poll id"),
+    ),
+    request_body(content = PublishResults),
+    responses(
+        (status = OK, body = UpdatedPoll, description = "Updated poll"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+    security(("ac-manage-polls" = [])),
+)]
+async fn publish_results(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
     Json(publish_results): Json<PublishResults>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManagePolls)?;
 
-    let poll = sea_entity::poll::Entity::find()
-        .filter(Database::filter_poll_by_id(
-            &id,
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
+        .filter(Database::filter_polls(
             &claims.sub,
             claims.groups.clone(),
+            None,
         ))
         .one(&store.db.sea)
         .await?;
@@ -875,7 +1349,7 @@ pub async fn publish_results(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = Store::now()?.as_secs_f64();
+    let now = now().as_secs_f64();
 
     if poll.ends > now {
         return Err(RestError::bad_req("Poll is still active"));
@@ -889,28 +1363,56 @@ pub async fn publish_results(
 
     let mut poll = poll.into_active_model();
     poll.results_public = Set(publish_results.published);
-    poll.save(&store.db.sea).await?;
 
-    Ok(())
+    let polls = sea_entity::poll::Entity::update_many()
+        .set(poll)
+        .filter(
+            sea_orm::Condition::all()
+                .add(sea_entity::poll::Column::Id.eq(&id.0))
+                .add(sea_entity::poll::Column::UpdatedAt.eq(publish_results.updated_at)),
+        )
+        .exec_with_returning(&store.db.sea)
+        .await?;
+
+    if polls.len() != 1 {
+        return Err(RestError::conflict("Poll was modified"));
+    }
+
+    let poll = polls.into_iter().next().unwrap();
+
+    Ok(Json(UpdatedPoll {
+        updated_at: poll.updated_at,
+    }))
 }
 
-pub async fn join_group(
+#[utoipa::path(
+    post,
+    path = "/api/group/{id}",
+    description = "Accept a group invite",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "The group id"),
+    ),
+    responses(
+        (status = OK, description = "Group joined"),
+        (status = NOT_FOUND, description = "Invite not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn join_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth)?;
+
+    tracing::warn!("huh? {id}");
 
     // TODO this currently assumes the invite link is shared out-of-band
     // available invites could also be shown to the user directly, but should include enough information
     // to uniquely identify the group the user would be joining
 
-    if sea_entity::group_join_request::Entity::find()
-        .filter(
-            sea_orm::Condition::all()
-                .add(sea_entity::group_join_request::Column::GroupId.eq(&id))
-                .add(sea_entity::group_join_request::Column::UserId.eq(&claims.sub)),
-        )
+    if sea_entity::group_join_request::Entity::find_by_id((id.0.clone(), claims.sub.clone()))
         .one(&store.db.sea)
         .await?
         .is_none()
@@ -921,14 +1423,14 @@ pub async fn join_group(
     let user_id = claims.sub.clone();
     transaction!(&store.db.sea, txn, {
         sea_entity::group_user::ActiveModel {
-            group_id: Set(id.clone()),
+            group_id: Set(id.0.clone()),
             user_id: Set(user_id.clone()),
             ..Default::default()
         }
         .insert(txn)
         .await?;
 
-        sea_entity::group_join_request::Entity::delete_by_id((id.clone(), user_id.clone()))
+        sea_entity::group_join_request::Entity::delete_by_id((id.0.clone(), user_id.clone()))
             .exec(txn)
             .await?;
         Ok(())
@@ -939,26 +1441,38 @@ pub async fn join_group(
     Ok(())
 }
 
-pub async fn leave_group(
+#[utoipa::path(
+    delete,
+    path = "/api/group/{id}",
+    description = "Leave a group",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "The group id"),
+    ),
+    responses(
+        (status = OK, description = "Group left"),
+        (status = NOT_FOUND, description = "Group not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn leave_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth)?;
 
-    let group = sea_entity::group_user::Entity::find()
-        .filter(Database::filter_group_user(&id, &claims.sub))
-        .find_also_related(sea_entity::group::Entity)
+    let group_user = sea_entity::group_user::Entity::find_by_id((id.0.clone(), claims.sub.clone()))
         .one(&store.db.sea)
         .await?;
 
-    let Some((_, Some(group))) = group else {
+    if group_user.is_none() {
         return Err(RestError::not_found("Group not found"));
     };
 
     let user_id = claims.sub.clone();
     transaction!(&store.db.sea, txn, {
-        Database::remove_user_from_group(txn, &id, &user_id, &group.owner_id).await
+        Database::remove_user_from_group(txn, &id.0, &user_id).await
     })?;
 
     store.jwt.revoke_access(&claims.sub).await?;
@@ -966,7 +1480,19 @@ pub async fn leave_group(
     Ok(())
 }
 
-pub async fn add_group(
+#[utoipa::path(
+    post,
+    path = "/api/groups",
+    description = "Add a group",
+    tag = "groups",
+    request_body(content = AddGroup),
+    responses(
+        (status = OK, body = FetchGroup, description = "Group created"),
+        (status = BAD_REQUEST, description = "Bad options provided"),
+    ),
+    security(("ac-manage-groups" = [])),
+)]
+async fn add_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
     Json(add_group): Json<AddGroup>,
@@ -999,27 +1525,38 @@ pub async fn add_group(
 
     store.jwt.revoke_access(&claims.sub).await?;
 
-    Ok(Json(Group {
+    Ok(Json(FetchGroup {
         id: group.id,
         name: group.name,
         owner: claims.sub.clone(),
         members: vec![Member { id: claims.sub }],
+        updated_at: group.updated_at,
     }))
 }
 
-pub async fn fetch_group(
+#[utoipa::path(
+    get,
+    path = "/api/groups/{id}",
+    description = "Fetch info about a group",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "Group id")
+    ),
+    responses(
+        (status = OK, body = FetchGroup, description = "The requested group"),
+        (status = NOT_FOUND, description = "Group not found"),
+    ),
+    security(("ac-base" = [])),
+)]
+async fn fetch_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth)?;
 
-    let group = sea_entity::group::Entity::find()
-        .filter(
-            sea_orm::Condition::all()
-                .add(sea_entity::group::Column::Id.eq(&id))
-                .add(sea_entity::group::Column::Id.is_in(claims.groups.clone())),
-        )
+    let group = sea_entity::group::Entity::find_by_id(&id.0)
+        .filter(sea_entity::group::Column::Id.is_in(claims.groups.clone()))
         .find_with_related(sea_entity::group_user::Entity)
         .all(&store.db.sea)
         .await?;
@@ -1028,7 +1565,7 @@ pub async fn fetch_group(
         return Err(RestError::not_found("Group not found"));
     };
 
-    Ok(Json(Group {
+    Ok(Json(FetchGroup {
         id: group.id,
         name: group.name,
         owner: group.owner_id,
@@ -1038,23 +1575,36 @@ pub async fn fetch_group(
                 id: group_user.user_id,
             })
             .collect(),
+        updated_at: group.updated_at,
     }))
 }
 
-pub async fn edit_group(
+#[utoipa::path(
+    patch,
+    path = "/api/groups/{id}",
+    description = "Edit a group",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "Group id")
+    ),
+    request_body(content = EditGroup, description = "The fields to change"),
+    responses(
+        (status = OK, body = FetchGroup, description = "The updated group"),
+        (status = BAD_REQUEST, description = "Bad options provided"),
+        (status = NOT_FOUND, description = "Group not found"),
+    ),
+    security(("ac-manage-groups" = [])),
+)]
+async fn edit_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
     Json(edit_group): Json<EditGroup>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManageGroups)?;
 
-    let group = sea_entity::group::Entity::find()
-        .filter(
-            sea_orm::Condition::all()
-                .add(sea_entity::group::Column::Id.eq(id.clone()))
-                .add(sea_entity::group::Column::OwnerId.eq(&claims.sub)),
-        )
+    let group = sea_entity::group::Entity::find_by_id(&id.0)
+        .filter(sea_entity::group::Column::OwnerId.eq(&claims.sub))
         .one(&store.db.sea)
         .await?;
 
@@ -1064,6 +1614,7 @@ pub async fn edit_group(
 
     transaction!(store.db.sea, txn, {
         let mut group = group.into_active_model();
+        group.name.reset();
 
         if let Some(name) = edit_group.name {
             validate_text!(&name);
@@ -1071,47 +1622,86 @@ pub async fn edit_group(
         }
 
         if let Some(owner_id) = edit_group.owner {
-            if owner_id == claims.sub {
-                return Err(RestError::bad_req("You already own this group"));
+            if owner_id != claims.sub {
+                let group_user =
+                    sea_entity::group_user::Entity::find_by_id((id.0.clone(), owner_id.clone()))
+                        .find_also_related(sea_entity::user::Entity)
+                        .one(txn)
+                        .await?;
+
+                let Some((_, Some(new_owner))) = group_user else {
+                    return Err(RestError::not_found("User not found"));
+                };
+
+                if !new_owner.permissions.contains(&Permissions::ManageGroups) {
+                    return Err(RestError::forbidden("User cannot manage groups"));
+                }
+
+                group.owner_id = Set(owner_id);
             }
-
-            let group_user = sea_entity::group_user::Entity::find()
-                .filter(Database::filter_group_user(&id, &owner_id))
-                .find_also_related(sea_entity::user::Entity)
-                .one(txn)
-                .await?;
-
-            let Some((_, Some(new_owner))) = group_user else {
-                return Err(RestError::not_found("User not found"));
-            };
-
-            if !new_owner.permissions.contains(&Permissions::ManageGroups) {
-                return Err(RestError::forbidden("User cannot manage groups"));
-            }
-
-            group.owner_id = Set(owner_id);
         }
 
-        group.update(txn).await?;
+        let groups = sea_entity::group::Entity::update_many()
+            .set(group)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sea_entity::group::Column::Id.eq(&id.0))
+                    .add(sea_entity::group::Column::UpdatedAt.eq(edit_group.updated_at)),
+            )
+            .exec_with_returning(txn)
+            .await?;
 
-        Ok(())
-    })?;
+        if groups.len() != 1 {
+            return Err(RestError::conflict("Group was modified"));
+        }
 
-    Ok(())
+        let group = groups.into_iter().next().unwrap();
+        let group_users = sea_entity::group_user::Entity::find()
+            .filter(sea_entity::group_user::Column::GroupId.eq(&group.id))
+            .all(txn)
+            .await?;
+
+        Ok(Json(FetchGroup {
+            id: id.0,
+            name: group.name,
+            owner: group.owner_id,
+            members: group_users
+                .into_iter()
+                .map(|group_user| Member {
+                    id: group_user.user_id,
+                })
+                .collect(),
+            updated_at: group.updated_at,
+        }))
+    })
 }
 
-pub async fn remove_group(
+#[utoipa::path(
+    delete,
+    path = "/api/groups/{id}",
+    description = "Remove a group",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "Group id")
+    ),
+    responses(
+        (status = OK, description = "Group removed"),
+        (status = NOT_FOUND, description = "Group not found"),
+    ),
+    security(("ac-manage-groups" = [])),
+)]
+async fn remove_group(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManageGroups)?;
 
-    let group = sea_entity::group::Entity::find()
+    let group = sea_entity::group::Entity::find_by_id(&id.0)
         .filter(
             sea_orm::query::Condition::all()
-                .add(Database::filter_group_by_owner(&id, &claims.sub))
-                .add(sea_entity::group_user::Column::GroupId.eq(&id)),
+                .add(sea_entity::group::Column::OwnerId.eq(&claims.sub))
+                .add(sea_entity::group_user::Column::GroupId.eq(&id.0)),
         )
         .find_with_related(sea_entity::group_user::Entity)
         .all(&store.db.sea)
@@ -1121,16 +1711,40 @@ pub async fn remove_group(
         return Err(RestError::not_found("Group not found"));
     };
 
-    transaction!(&store.db.sea, txn, {
-        sea_entity::group::Entity::delete_by_id(&id)
+    let poll_images = transaction!(&store.db.sea, txn, {
+        let mut poll_images = Vec::new();
+        for poll in sea_entity::poll::Entity::find()
+            .filter(sea_entity::poll::Column::GroupId.eq(&id.0))
+            .all(txn)
+            .await?
+        {
+            poll_images.extend_from_slice(
+                &sea_entity::image::Entity::delete_many()
+                    .filter(sea_entity::image::Column::PollId.eq(&poll.id))
+                    .exec_with_returning(txn)
+                    .await?
+                    .into_iter()
+                    .map(|image| image.id)
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        sea_entity::poll::Entity::delete_many()
+            .filter(sea_entity::poll::Column::GroupId.eq(&id.0))
             .exec(txn)
             .await?;
 
-        // todo figure out if we want to delete associated polls or not
-        // maybe a with_delete option?
+        sea_entity::group::Entity::delete_by_id(&id.0)
+            .exec(txn)
+            .await?;
 
-        Ok(())
+        Ok(poll_images)
     })?;
+
+    for image in poll_images {
+        let path = store.image_path.join(&image);
+        remove_file(&path, &image).await;
+    }
 
     for user in group_users {
         store.jwt.revoke_access(&user.user_id).await?;
@@ -1139,15 +1753,32 @@ pub async fn remove_group(
     Ok(())
 }
 
-pub async fn add_group_user(
+#[utoipa::path(
+    post,
+    path = "/api/groups/{id}/{user_id}",
+    description = "Invite a user to a group",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "Group id"),
+        ("user_id" = IdString, Path, description = "User id to invite")
+    ),
+    responses(
+        (status = OK, description = "User invited"),
+        (status = BAD_REQUEST, description = "User already in group"),
+        (status = NOT_FOUND, description = "Group or user not found"),
+        (status = CONFLICT, description = "User already invited"),
+    ),
+    security(("ac-manage-groups" = [])),
+)]
+async fn add_group_user(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path((id, user_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((id, user_id)): axum::extract::Path<(IdString, IdString)>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManageGroups)?;
 
-    if sea_entity::group::Entity::find()
-        .filter(Database::filter_group_by_owner(&id, &claims.sub))
+    if sea_entity::group::Entity::find_by_id(&id.0)
+        .filter(sea_entity::group::Column::OwnerId.eq(&claims.sub))
         .one(&store.db.sea)
         .await?
         .is_none()
@@ -1155,7 +1786,7 @@ pub async fn add_group_user(
         return Err(RestError::not_found("Group not found"));
     }
 
-    if sea_entity::user::Entity::find_by_id(&user_id)
+    if sea_entity::user::Entity::find_by_id(&user_id.0)
         .one(&store.db.sea)
         .await?
         .is_none()
@@ -1163,7 +1794,7 @@ pub async fn add_group_user(
         return Err(RestError::not_found("User not found"));
     }
 
-    if sea_entity::group_user::Entity::find_by_id((id.clone(), user_id.clone()))
+    if sea_entity::group_user::Entity::find_by_id((id.0.clone(), user_id.0.clone()))
         .one(&store.db.sea)
         .await?
         .is_some()
@@ -1171,37 +1802,48 @@ pub async fn add_group_user(
         return Err(RestError::bad_req("User already in group"));
     }
 
-    let inner_user_id = user_id.clone();
-    transaction!(store.db.sea, txn, {
-        sea_entity::group_join_request::ActiveModel {
-            group_id: Set(id),
-            user_id: Set(inner_user_id),
-            ..Default::default()
-        }
-        .insert(txn)
-        .await?;
-
-        Ok(())
-    })?;
+    sea_entity::group_join_request::ActiveModel {
+        group_id: Set(id.0),
+        user_id: Set(user_id.0),
+        ..Default::default()
+    }
+    .insert(&store.db.sea)
+    .await?;
 
     Ok(())
 }
 
-pub async fn remove_group_user(
+#[utoipa::path(
+    delete,
+    path = "/api/groups/{id}/{user_id}",
+    description = "Remove a user from a group",
+    tag = "groups",
+    params(
+        ("id" = IdString, Path, description = "Group id"),
+        ("user_id" = IdString, Path, description = "User id to remove")
+    ),
+    responses(
+        (status = OK, description = "User removed"),
+        (status = BAD_REQUEST, description = "Removing yourself is not allowed"),
+        (status = NOT_FOUND, description = "Group not found or user not in group"),
+    ),
+    security(("ac-manage-groups" = [])),
+)]
+async fn remove_group_user(
     State(store): State<Arc<Store>>,
     TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
-    axum::extract::Path((id, user_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((id, user_id)): axum::extract::Path<(IdString, IdString)>,
 ) -> Result<impl IntoResponse, RestError> {
     let claims = requires!(store, auth, Permissions::ManageGroups)?;
 
-    if claims.sub == user_id {
+    if claims.sub == user_id.0 {
         return Err(RestError::bad_req(
             "You cannot remove yourself from the group",
         ));
     }
 
-    if sea_entity::group::Entity::find()
-        .filter(Database::filter_group_by_owner(&id, &claims.sub))
+    if sea_entity::group::Entity::find_by_id(&id.0)
+        .filter(sea_entity::group::Column::OwnerId.eq(&claims.sub))
         .one(&store.db.sea)
         .await?
         .is_none()
@@ -1209,8 +1851,7 @@ pub async fn remove_group_user(
         return Err(RestError::not_found("Group not found"));
     }
 
-    if sea_entity::group_user::Entity::find()
-        .filter(Database::filter_group_user(&id, &user_id))
+    if sea_entity::group_user::Entity::find_by_id((id.0.clone(), user_id.0.clone()))
         .one(&store.db.sea)
         .await?
         .is_none()
@@ -1218,23 +1859,35 @@ pub async fn remove_group_user(
         return Err(RestError::not_found("User not in group"));
     }
 
-    let inner_user_id = user_id.clone();
+    let inner_user_id = user_id.0.clone();
     transaction!(&store.db.sea, txn, {
-        Database::remove_user_from_group(txn, &id, &inner_user_id, &claims.sub).await
+        Database::remove_user_from_group(txn, &id.0, &inner_user_id).await
     })?;
 
-    store.jwt.revoke_access(&user_id).await?;
+    store.jwt.revoke_access(&user_id.0).await?;
 
     Ok(())
 }
 
-pub async fn fetch_voting_image(
+#[utoipa::path(
+    get,
+    path = "/api/v/image/{name}",
+    description = "Fetch a public image",
+    tag = "voting",
+    params(
+        ("name" = FileName, Path, description = "Name of the image"),
+    ),
+    responses(
+        (status = OK, body = [u8], description = "The requested image"),
+        (status = NOT_FOUND, description = "Image not found"),
+    ),
+)]
+async fn fetch_voting_image(
     State(store): State<Arc<Store>>,
     axum::extract::Path(name): axum::extract::Path<FileName>,
     request: axum::http::Request<Body>,
 ) -> Result<impl IntoResponse, RestError> {
-    let image = sea_entity::image::Entity::find()
-        .filter(sea_entity::image::Column::Id.eq(&name.0))
+    let image = sea_entity::image::Entity::find_by_id(&name.0)
         .one(&store.db.sea)
         .await?;
 
@@ -1245,12 +1898,24 @@ pub async fn fetch_voting_image(
     serve_image(store, name, image.mime, request).await
 }
 
-pub async fn fetch_voting_poll(
+#[utoipa::path(
+    get,
+    path = "/api/v/poll/{id}",
+    description = "Fetch a public poll",
+    tag = "voting",
+    params(
+        ("id" = IdString, Path, description = "Poll id"),
+    ),
+    responses(
+        (status = OK, body = FetchVotingPoll, description = "The requested poll"),
+        (status = NOT_FOUND, description = "Poll not found"),
+    ),
+)]
+async fn fetch_voting_poll(
     State(store): State<Arc<Store>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
-    let poll = sea_entity::poll::Entity::find()
-        .filter(sea_entity::poll::Column::Id.eq(id))
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
         .one(&store.db.sea)
         .await?;
 
@@ -1279,13 +1944,25 @@ pub async fn fetch_voting_poll(
     }))
 }
 
-pub async fn fetch_vote(
+#[utoipa::path(
+    get,
+    path = "/api/v/poll/{id}/vote",
+    description = "Vote on a poll",
+    tag = "voting",
+    params(
+        ("id" = IdString, Path, description = "Poll id"),
+    ),
+    responses(
+        (status = OK, body = FetchVotingPoll, description = "The requested vote"),
+        (status = NOT_FOUND, description = "Poll or vote not found"),
+    ),
+)]
+async fn fetch_vote(
     State(store): State<Arc<Store>>,
     Extension(eph_user): Extension<InjectedEphemeralUser>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
-    let poll = sea_entity::poll::Entity::find()
-        .filter(sea_entity::poll::Column::Id.eq(id))
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
         .one(&store.db.sea)
         .await?;
 
@@ -1320,14 +1997,27 @@ pub async fn fetch_vote(
     Ok(Json(FetchVote { created, votes }))
 }
 
-pub async fn vote(
+#[utoipa::path(
+    post,
+    path = "/api/v/poll/{id}/vote",
+    description = "Fetch a vote",
+    tag = "voting",
+    params(
+        ("id" = IdString, Path, description = "Poll id"),
+    ),
+    responses(
+        (status = OK, body = Vote, description = "Vote recorded"),
+        (status = BAD_REQUEST, description = "Poll has ended or bad votes"),
+        (status = NOT_FOUND, description = "Poll or vote not found"),
+    ),
+)]
+async fn vote(
     State(store): State<Arc<Store>>,
     Extension(eph_user): Extension<InjectedEphemeralUser>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
     Json(vote): Json<Vote>,
 ) -> Result<impl IntoResponse, RestError> {
-    let poll = sea_entity::poll::Entity::find()
-        .filter(sea_entity::poll::Column::Id.eq(id))
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
         .one(&store.db.sea)
         .await?;
 
@@ -1335,7 +2025,7 @@ pub async fn vote(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = Store::now()?.as_secs_f64();
+    let now = now().as_secs_f64();
 
     if poll.ends < now {
         return Err(RestError::bad_req("Poll has ended"));
@@ -1368,8 +2058,7 @@ pub async fn vote(
     }
 
     for image_id in &vote.votes {
-        let image = sea_entity::image::Entity::find()
-            .filter(sea_entity::image::Column::Id.eq(image_id))
+        let image = sea_entity::image::Entity::find_by_id(image_id)
             .one(&store.db.sea)
             .await?;
 
@@ -1402,12 +2091,26 @@ pub async fn vote(
     Ok(())
 }
 
-pub async fn fetch_voting_results(
+#[utoipa::path(
+    get,
+    path = "/api/v/poll/{id}/results",
+    description = "Fetch results for a public poll",
+    tag = "voting",
+    params(
+        ("id" = IdString, Path, description = "Poll id"),
+    ),
+    responses(
+        (status = OK, body = FetchVoteResults, description = "The requested results"),
+        (status = BAD_REQUEST, description = "Poll still active"),
+        (status = FORBIDDEN, description = "Results not public"),
+        (status = NOT_FOUND, description = "Poll or vote not found"),
+    ),
+)]
+async fn fetch_voting_results(
     State(store): State<Arc<Store>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<IdString>,
 ) -> Result<impl IntoResponse, RestError> {
-    let poll = sea_entity::poll::Entity::find()
-        .filter(sea_entity::poll::Column::Id.eq(id))
+    let poll = sea_entity::poll::Entity::find_by_id(&id.0)
         .one(&store.db.sea)
         .await?;
 
@@ -1415,7 +2118,7 @@ pub async fn fetch_voting_results(
         return Err(RestError::not_found("Poll not found"));
     };
 
-    let now = Store::now()?.as_secs_f64();
+    let now = now().as_secs_f64();
 
     if poll.ends > now {
         return Err(RestError::bad_req("Poll is still active"));

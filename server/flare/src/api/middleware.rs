@@ -9,12 +9,15 @@ use axum_extra::extract::CookieJar;
 use sea_orm::{ActiveValue::Set, IntoActiveModel, entity::prelude::*};
 use secstr::SecUtf8;
 
-use crate::store::Store;
+use crate::{
+    crypto::Hasher,
+    store::Store,
+    time::{ONE_YEAR, now},
+};
 
-use super::error::RestError;
+use super::{error::RestError, services::extract_ip};
 
 const COOKIE_NAME: &str = "user-id";
-const ALGO_NAME: &str = "SHA-3(512)";
 
 #[derive(Clone, Debug)]
 pub struct InjectedEphemeralUser {
@@ -27,30 +30,10 @@ pub async fn set_tracking_cookie(
     mut request: Request,
     next: middleware::Next,
 ) -> Result<impl IntoResponse, RestError> {
-    let ip = request
-        .headers()
-        .get("cf-connecting-ip")
-        .or_else(|| request.headers().get("X-Forwarded-For"))
-        .and_then(|header_value| {
-            header_value
-                .to_str()
-                .ok()
-                .and_then(|s| s.split(',').next().map(|s| s.trim().to_string()))
-        })
-        .or_else(|| {
-            request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|connect_info| connect_info.0.ip().to_string())
-        })
-        .map(|ip| {
-            let mut hasher = botan::HashFunction::new(ALGO_NAME).unwrap();
-            hasher.update(ip.as_bytes()).unwrap();
-            let hash = hasher.finish().unwrap();
-            botan::hex_encode(&hash).unwrap()
-        });
+    let ip = extract_ip(&request)
+        .map(|ip| Hasher::hash(ip.as_bytes()))
+        .transpose()?;
 
-    // TODO eph user needs a last_seen or similar for the cleanup task
     if let Some(ip) = ip {
         let mut eph_user = sea_entity::ephemeral_user::Entity::find()
             .filter(sea_entity::ephemeral_user::Column::Ip.eq(&ip))
@@ -80,16 +63,18 @@ pub async fn set_tracking_cookie(
         let eph_user = eph_user.unwrap();
         let eph_user_id = eph_user.id;
 
-        if eph_user.ip != ip {
-            let mut eph_user = eph_user.into_active_model();
+        let previous_ip = eph_user.ip.clone();
+        let mut eph_user = eph_user.into_active_model();
+        eph_user.last_seen_at = Set(now().as_secs_f64());
+        if previous_ip != ip {
             eph_user.ip = Set(ip.clone());
-            eph_user.update(&store.db.sea).await?;
         }
+        eph_user.update(&store.db.sea).await?;
 
         let cookie = store.jwt.build_cookie(
             COOKIE_NAME.to_string(),
             &SecUtf8::from(cookie),
-            (60 * 24 * 365 * 10) as f64,
+            ONE_YEAR,
             false,
         );
         jar = jar.add(cookie);
@@ -100,6 +85,7 @@ pub async fn set_tracking_cookie(
             .insert(InjectedEphemeralUser { id: eph_user_id });
     } else {
         tracing::warn!("No IP found in request headers");
+        return Err(RestError::bad_req("No client ip present"));
     }
 
     let response = next.run(request).await;

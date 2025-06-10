@@ -3,7 +3,10 @@ use std::{path::PathBuf, time::Duration};
 use secstr::{SecStr, SecUtf8};
 use serde::Deserialize;
 
-use crate::crypto::{deserialize_secstr_hex, deserialize_secutf8};
+use crate::{
+    crypto::{deserialize_secstr_hex, deserialize_secutf8},
+    time::{ONE_DAY, ONE_HOUR, ONE_MONTH},
+};
 
 fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
@@ -14,11 +17,11 @@ where
     // Parse strings like "24h" or "7d"
     let len = duration_str.len();
     let (value, unit) = duration_str.split_at(len - 1);
-    let value: u64 = value.parse().map_err(serde::de::Error::custom)?;
+    let value = value.parse::<u64>().map_err(serde::de::Error::custom)?;
 
     let delta = match unit {
-        "h" => Duration::from_secs(value * 60 * 60),
-        "d" => Duration::from_secs(value * 24 * 60 * 60),
+        "h" => Duration::from_secs(value * (ONE_HOUR as u64)),
+        "d" => Duration::from_secs(value * (ONE_DAY as u64)),
         _ => return Err(serde::de::Error::custom("duration must end with h or d")),
     };
 
@@ -34,8 +37,8 @@ pub struct AdminConfig {
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
     pub base_path: PathBuf,
-    pub database_url: String,
-    pub redis_url: String,
+    pub postgres_url: String,
+    pub valkey_url: String,
     pub admin: AdminConfig,
 }
 
@@ -45,10 +48,10 @@ pub struct JwtConfig {
     pub access_expiry: Duration,
     #[serde(deserialize_with = "deserialize_duration")]
     pub refresh_expiry: Duration,
-    #[serde(deserialize_with = "deserialize_secstr_hex")]
-    pub access_secret: SecStr,
-    #[serde(deserialize_with = "deserialize_secstr_hex")]
-    pub refresh_secret: SecStr,
+    #[serde(deserialize_with = "deserialize_secutf8")]
+    pub access_passphrase: SecUtf8,
+    #[serde(deserialize_with = "deserialize_secutf8")]
+    pub refresh_passphrase: SecUtf8,
     pub domain: String,
 }
 
@@ -108,18 +111,18 @@ impl Default for FlareConfig {
             store: StoreConfig {
                 storage: StorageConfig {
                     base_path: PathBuf::from("./data"),
-                    database_url: "postgresql://flare:flare@localhost:5432/flare-db".to_string(),
-                    redis_url: "redis://localhost:6379".to_string(),
+                    postgres_url: "postgresql://flare:flare@localhost:5432/flare-db".to_string(),
+                    valkey_url: "redis://localhost:6379".to_string(),
                     admin: AdminConfig {
                         discord_id: Some("flare-0".to_string()),
-                        github_id: Some("flare-0".to_string()),
+                        github_id: Some("flare-1".to_string()),
                     },
                 },
                 jwt: JwtConfig {
-                    access_expiry: Duration::from_secs(60 * 60),
-                    refresh_expiry: Duration::from_secs(30 * 24 * 60 * 60),
-                    access_secret: SecStr::from(""),
-                    refresh_secret: SecStr::from(""),
+                    access_expiry: Duration::from_secs(ONE_HOUR as u64),
+                    refresh_expiry: Duration::from_secs(ONE_MONTH as u64),
+                    access_passphrase: SecUtf8::from(""),
+                    refresh_passphrase: SecUtf8::from(""),
                     domain: "localhost".to_string(),
                 },
                 oauth: OAuthConfig {

@@ -1,6 +1,8 @@
 use secstr::{SecStr, SecUtf8};
 use serde::{Deserialize, Serializer};
 
+use crate::api::error::RestError;
+
 pub fn deserialize_secstr_hex<'de, D>(deserializer: D) -> Result<SecStr, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -25,44 +27,59 @@ where
     serializer.serialize_str(value.unsecure())
 }
 
-pub struct PkceCipher {
+pub struct Cipher {
     key: SecStr,
 }
 
-impl PkceCipher {
+impl Cipher {
     const ALGO_NAME: &'static str = "AES-256/GCM";
 
     pub fn new(key: &SecStr) -> Self {
+        let cipher = botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Encrypt).unwrap();
+        assert_eq!(
+            key.unsecure().len(),
+            cipher.key_spec().unwrap().maximum_keylength()
+        );
         Self { key: key.clone() }
     }
 
-    pub fn encrypt(&self, data: &[u8]) -> String {
-        let mut cipher =
-            botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Encrypt).unwrap();
-        cipher.set_key(self.key.unsecure()).unwrap();
+    pub fn encrypt(&self, data: &[u8]) -> Result<String, RestError> {
+        let mut cipher = botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Encrypt)?;
+        cipher.set_key(self.key.unsecure())?;
 
-        let nonce = botan::RandomNumberGenerator::new()
-            .unwrap()
-            .read(cipher.default_nonce_length())
-            .unwrap();
+        let nonce =
+            botan::RandomNumberGenerator::new_system()?.read(cipher.default_nonce_length())?;
 
-        let encrypted = cipher.process(&nonce, data).unwrap();
+        let encrypted = cipher.process(&nonce, data)?;
         let mut result = Vec::with_capacity(nonce.len() + encrypted.len());
         result.extend_from_slice(nonce.as_ref());
         result.extend_from_slice(&encrypted);
 
-        botan::hex_encode(&result).unwrap()
+        Ok(botan::hex_encode(&result)?)
     }
 
-    pub fn decrypt(&self, data: &str) -> Vec<u8> {
-        let mut cipher =
-            botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Decrypt).unwrap();
-        cipher.set_key(self.key.unsecure()).unwrap();
+    pub fn decrypt(&self, data: &str) -> Result<Vec<u8>, RestError> {
+        let mut cipher = botan::Cipher::new(Self::ALGO_NAME, botan::CipherDirection::Decrypt)?;
+        cipher.set_key(self.key.unsecure())?;
 
-        let data = botan::hex_decode(data).unwrap();
-        let nonce = &data[..12];
-        let decrypted = cipher.process(nonce, &data[12..]).unwrap();
-        decrypted.to_vec()
+        let data = botan::hex_decode(data)?;
+        let nonce_size = cipher.default_nonce_length();
+        let nonce = &data[..nonce_size];
+        let decrypted = cipher.process(nonce, &data[nonce_size..])?;
+        Ok(decrypted.to_vec())
+    }
+}
+
+pub struct Hasher;
+
+impl Hasher {
+    const ALGO_NAME: &str = "SHA-3(512)";
+
+    pub fn hash(data: &[u8]) -> Result<String, RestError> {
+        let mut hasher = botan::HashFunction::new(Self::ALGO_NAME)?;
+        hasher.update(data)?;
+        let hash = hasher.finish()?;
+        Ok(botan::hex_encode(&hash)?)
     }
 }
 
@@ -75,6 +92,7 @@ pub mod mtls {
         RootCertStore, ServerConfig,
         pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
         server::WebPkiClientVerifier,
+        version,
     };
 
     fn load_public_pem(path: &Path) -> Vec<CertificateDer<'static>> {
@@ -121,10 +139,44 @@ pub mod mtls {
             .unwrap();
 
         RustlsConfig::from_config(Arc::new(
-            ServerConfig::builder()
+            ServerConfig::builder_with_protocol_versions(&[&version::TLS13])
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(certs, private_key)
                 .unwrap(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use secstr::SecStr;
+
+    use super::Cipher;
+
+    #[test]
+    fn test_cipher() {
+        let key = SecStr::new(
+            botan::RandomNumberGenerator::new_userspace()
+                .unwrap()
+                .read(32)
+                .unwrap(),
+        );
+        let other_key = SecStr::new(vec![1; 32]);
+
+        let cipher = Cipher::new(&key);
+        let message = b"Hello, world!";
+        let encrypted = cipher.encrypt(message).unwrap();
+        assert_ne!(message, encrypted.as_bytes());
+        assert_eq!(*message, *cipher.decrypt(&encrypted).unwrap());
+
+        let other_cipher = Cipher::new(&other_key);
+        assert!(other_cipher.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cipher_key_len() {
+        let key = SecStr::new(vec![0; 31]);
+        let _ = Cipher::new(&key);
     }
 }

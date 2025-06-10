@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 
-use flare::api::api_params::{AddPoll, EditPoll, FetchPollSort, Paginator, PublishResults, Vote};
+use flare::api::api_params::{
+    AddPoll, EditPoll, FetchPollSort, Paginator, PublishResults, UpdatedPoll, Vote,
+};
 use flare_sim::{
     helpers::{
-        add_image, add_poll, edit_poll, fetch_poll, fetch_polls, fetch_results, fetch_vote,
-        fetch_voting_poll, fetch_voting_results, get_client, login, logins, logout, png_images,
-        publish_results, remove_poll, vote,
+        add_image, add_poll, add_poll_to_group, edit_poll, fetch_image, fetch_poll, fetch_polls,
+        fetch_results, fetch_vote, fetch_voting_poll, fetch_voting_results, get_client, login,
+        logins, logout, png_images, publish_results, remove_group, remove_image, remove_poll,
+        upload_all_pngs, upload_many_pngs, vote,
     },
     test_builder::flare_test,
     turmoil,
@@ -21,16 +24,7 @@ fn test_add_remove_poll() -> turmoil::Result {
             let client = get_client(0).await.0;
             let other_client = get_client(1).await.0;
 
-            let mut images = Vec::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime)
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.push(uploaded);
-            }
+            let images = upload_all_pngs(&client).await;
 
             let mut invalid_poll = AddPoll {
                 title: "foo".to_string(),
@@ -83,6 +77,16 @@ fn test_add_remove_poll() -> turmoil::Result {
                 add_poll(&client, invalid_poll.clone())
                     .await
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
+            );
+
+            invalid_poll.allowed_votes = 2;
+            invalid_poll.group = Some("abc".to_string());
+
+            // adding to a poll that doesn't exist / we're not a part of
+            assert!(
+                add_poll(&client, invalid_poll.clone())
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
 
             let poll = add_poll(
@@ -231,17 +235,7 @@ fn test_fetch_polls() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
             );
 
-            let mut images = Vec::new();
-
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime)
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.push(uploaded);
-            }
+            let images = upload_all_pngs(&client).await;
 
             let mut polls = Vec::new();
 
@@ -396,22 +390,9 @@ fn test_edit_poll() -> turmoil::Result {
 
         sim.client("client", async move {
             let client = get_client(0).await.0;
-            let mut initial_images = Vec::new();
-            let mut add_images = Vec::new();
 
-            for (idx, image) in png_images().iter().take(5).enumerate() {
-                let uploaded = add_image(&client, image, "image/png")
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                if idx < 3 {
-                    initial_images.push(uploaded);
-                } else {
-                    add_images.push(uploaded);
-                }
-            }
+            let initial_images = upload_many_pngs(&client, 0, 3).await;
+            let add_images = upload_many_pngs(&client, 4, 6).await;
 
             let mut title = "Poll that will be edited".to_string();
 
@@ -451,6 +432,7 @@ fn test_edit_poll() -> turmoil::Result {
                     info: None,
                     ends: None,
                     allowed_votes: None,
+                    updated_at: poll.updated_at,
                 },
             )
             .await
@@ -475,6 +457,26 @@ fn test_edit_poll() -> turmoil::Result {
                     .all(|i| current_images.contains(i))
             );
 
+            // editing a modified poll
+            assert!(
+                edit_poll(
+                    &client,
+                    &poll.id.clone(),
+                    EditPoll {
+                        title: Some("test".to_string()),
+                        info: None,
+                        ends: None,
+                        allowed_votes: None,
+                        add_images: None,
+                        remove_images: None,
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::CONFLICT))
+            );
+
+            // trying to remove all images
             assert!(
                 edit_poll(
                     &client,
@@ -485,13 +487,15 @@ fn test_edit_poll() -> turmoil::Result {
                         ends: None,
                         allowed_votes: None,
                         add_images: None,
-                        remove_images: Some(current_images.iter().cloned().collect())
+                        remove_images: Some(current_images.iter().cloned().collect()),
+                        updated_at: poll.updated_at,
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
+            // trying to remove all but one image
             assert!(
                 edit_poll(
                     &client,
@@ -502,13 +506,15 @@ fn test_edit_poll() -> turmoil::Result {
                         ends: None,
                         allowed_votes: None,
                         add_images: None,
-                        remove_images: Some(current_images.iter().skip(1).cloned().collect())
+                        remove_images: Some(current_images.iter().skip(1).cloned().collect()),
+                        updated_at: poll.updated_at,
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
+            // trying to add already used images
             assert!(
                 edit_poll(
                     &client,
@@ -520,6 +526,7 @@ fn test_edit_poll() -> turmoil::Result {
                         allowed_votes: None,
                         add_images: Some(current_images.iter().cloned().collect()),
                         remove_images: None,
+                        updated_at: poll.updated_at,
                     }
                 )
                 .await
@@ -573,17 +580,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            let mut images = HashSet::new();
-
-            for image in png_images().iter().take(5) {
-                let uploaded = add_image(&client, image, "image/png")
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.insert(uploaded);
-            }
+            let images = upload_many_pngs(&client, 0, 5).await;
 
             let poll = add_poll(
                 &client,
@@ -591,7 +588,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                     title: "Friendly poll".to_string(),
                     info: "Very friendly poll, nothing to worry about here :)".to_string(),
                     ends: 0.0,
-                    images: images.clone(),
+                    images: HashSet::from_iter(images.iter().cloned()),
                     allowed_votes: 1,
                     group: None,
                 },
@@ -610,6 +607,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                         allowed_votes: None,
                         add_images: None,
                         remove_images: None,
+                        updated_at: poll.updated_at,
                     }
                 )
                 .await
@@ -627,6 +625,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                         allowed_votes: None,
                         add_images: None,
                         remove_images: None,
+                        updated_at: poll.updated_at,
                     }
                 )
                 .await
@@ -658,16 +657,7 @@ fn test_voting() -> turmoil::Result {
             let client = get_client(0).await.0;
             let (mut voter, voter_id) = get_client(1).await;
 
-            let mut images = Vec::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime)
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.push(uploaded);
-            }
+            let images = upload_all_pngs(&client).await;
 
             let old_poll = add_poll(
                 &client,
@@ -871,16 +861,7 @@ fn test_results() -> turmoil::Result {
             let voter_3 = get_client(3).await.0;
             let voter_4 = get_client(4).await.0;
 
-            let mut images = Vec::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime)
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.push(uploaded);
-            }
+            let images = upload_all_pngs(&client).await;
 
             let poll = add_poll(
                 &client,
@@ -952,7 +933,7 @@ fn test_results() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            edit_poll(
+            let poll = edit_poll(
                 &client,
                 &poll.id,
                 EditPoll {
@@ -962,18 +943,36 @@ fn test_results() -> turmoil::Result {
                     allowed_votes: None,
                     add_images: None,
                     remove_images: None,
+                    updated_at: poll.updated_at,
                 },
             )
             .await
             .unwrap();
 
-            publish_results(&client, &poll.id, PublishResults { published: true })
-                .await
-                .unwrap();
+            let updated_poll = publish_results(
+                &client,
+                &poll.id,
+                PublishResults {
+                    published: true,
+                    updated_at: poll.updated_at,
+                },
+            )
+            .await
+            .unwrap();
+
+            let poll = fetch_poll(&client, &poll.id).await.unwrap();
+
             assert!(
-                publish_results(&client, &poll.id, PublishResults { published: true })
-                    .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
+                publish_results(
+                    &client,
+                    &poll.id,
+                    PublishResults {
+                        published: true,
+                        updated_at: updated_poll.updated_at
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
             let results = fetch_results(&client, &poll.id).await.unwrap();
             assert!(results.ended == true);
@@ -993,9 +992,18 @@ fn test_results() -> turmoil::Result {
                 assert!(fetched_results.remaining.contains(image));
             }
 
-            publish_results(&client, &poll.id, PublishResults { published: false })
-                .await
-                .unwrap();
+            publish_results(
+                &client,
+                &poll.id,
+                PublishResults {
+                    published: false,
+                    updated_at: results.updated_at,
+                },
+            )
+            .await
+            .unwrap();
+
+            let poll = fetch_poll(&client, &poll.id).await.unwrap();
 
             let results = fetch_results(&client, &poll.id).await.unwrap();
             assert!(results.public == false);
@@ -1016,6 +1024,7 @@ fn test_results() -> turmoil::Result {
                     allowed_votes: None,
                     add_images: None,
                     remove_images: Some([images[0].clone()].into()),
+                    updated_at: poll.updated_at,
                 },
             )
             .await
@@ -1041,16 +1050,223 @@ fn test_results() -> turmoil::Result {
 fn test_group_poll() -> turmoil::Result {
     flare_test(|sim| {
         sim.create_basic_scenario();
-        sim.group_users("test-group", 0, vec![1, 2]);
+        sim.group_users("test-group", 0, vec![1]);
 
         sim.client("client", async move {
-            // TODO
-            // 0 creates a poll in the group, adds some of their own images to it
-            // 0 creates a poll outside the group, and adds it later
-            // 1 and 2 should be able to fetch the images, and the poll
-            // 1 and 2 should also be able to remove images from the poll, but calling remove directly on 0's images should not work
-            // adding their own images should work
-            // 1 or 2 should be able to remove the poll
+            let client = get_client(0).await.0;
+            let user_a = get_client(1).await.0;
+            let user_b = get_client(2).await.0;
+
+            let images = upload_all_pngs(&client).await;
+
+            let group_id = &client.get_groups()[0];
+
+            let poll = add_poll(
+                &client,
+                AddPoll {
+                    title: "group shared poll".to_string(),
+                    info: "multiple users can access this".to_string(),
+                    ends: f64::MAX,
+                    images: images[..4].iter().cloned().collect(),
+                    allowed_votes: 2,
+                    group: Some(group_id.clone()),
+                },
+            )
+            .await
+            .unwrap();
+
+            let client_fetched_poll = fetch_poll(&client, &poll.id).await.unwrap();
+            let user_a_fetched_poll = fetch_poll(&user_a, &poll.id).await.unwrap();
+            assert_eq!(client_fetched_poll.title, user_a_fetched_poll.title);
+            assert_eq!(client_fetched_poll.info, user_a_fetched_poll.info);
+            assert_eq!(client_fetched_poll.ends, user_a_fetched_poll.ends);
+            assert_eq!(
+                client_fetched_poll.allowed_votes,
+                user_a_fetched_poll.allowed_votes
+            );
+            assert_eq!(client_fetched_poll.group, user_a_fetched_poll.group);
+            for img in &images[..4] {
+                assert!(client_fetched_poll.images.contains(img));
+                assert!(user_a_fetched_poll.images.contains(img));
+                let client_img = fetch_image(&client, img).await.unwrap();
+                let user_a_img = fetch_image(&user_a, img).await.unwrap();
+                assert_eq!(client_img, user_a_img);
+                assert!(
+                    fetch_image(&user_b, img)
+                        .await
+                        .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+                );
+            }
+
+            assert!(
+                edit_poll(
+                    &user_a,
+                    &poll.id,
+                    EditPoll {
+                        title: None,
+                        info: None,
+                        ends: None,
+                        allowed_votes: None,
+                        add_images: Some([images[5].clone()].into()),
+                        remove_images: None,
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
+            );
+
+            let poll = edit_poll(
+                &client,
+                &poll.id,
+                EditPoll {
+                    title: None,
+                    info: None,
+                    ends: None,
+                    allowed_votes: None,
+                    add_images: Some([images[5].clone()].into()),
+                    remove_images: None,
+                    updated_at: poll.updated_at,
+                },
+            )
+            .await
+            .unwrap();
+
+            let user_a_img = add_image(&user_a, png_images()[0], "image/png")
+                .await
+                .unwrap()
+                .name;
+
+            assert!(
+                edit_poll(
+                    &user_a,
+                    &poll.id,
+                    EditPoll {
+                        title: None,
+                        info: None,
+                        ends: None,
+                        allowed_votes: None,
+                        add_images: Some([user_a_img.clone()].into()),
+                        remove_images: Some([images[5].clone()].into()),
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_ok()
+            );
+
+            assert!(
+                remove_image(&user_a, &images[0])
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            let fetched_poll = fetch_poll(&client, &poll.id).await.unwrap();
+            for img in [user_a_img].iter().chain(images[..4].iter()) {
+                assert!(fetched_poll.images.contains(img));
+                assert!(fetch_image(&client, img).await.is_ok());
+            }
+
+            assert!(remove_poll(&user_a, &poll.id).await.is_ok());
+            assert!(
+                fetch_poll(&client, &poll.id)
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            let client_images = images.into_iter().skip(6).collect::<Vec<_>>();
+
+            let poll = add_poll(
+                &client,
+                AddPoll {
+                    title: "initially private poll".to_string(),
+                    info: "needs to be added to group later".to_string(),
+                    ends: f64::MAX,
+                    images: client_images.iter().cloned().collect(),
+                    allowed_votes: 2,
+                    group: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            assert!(fetch_poll(&client, &poll.id).await.is_ok());
+            assert!(
+                fetch_poll(&user_a, &poll.id)
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            // wrong user
+            assert!(
+                add_poll_to_group(
+                    &user_a,
+                    &poll.id,
+                    &group_id,
+                    UpdatedPoll {
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            // wrong poll id
+            assert!(
+                add_poll_to_group(
+                    &client,
+                    &poll.id,
+                    "abc",
+                    UpdatedPoll {
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            // wrong updated_at timestamp
+            assert!(
+                add_poll_to_group(
+                    &client,
+                    &poll.id,
+                    &group_id,
+                    UpdatedPoll { updated_at: 0.0 }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::CONFLICT))
+            );
+
+            assert!(
+                add_poll_to_group(
+                    &client,
+                    &poll.id,
+                    &group_id,
+                    UpdatedPoll {
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_ok()
+            );
+
+            // already in group
+            assert!(
+                add_poll_to_group(
+                    &client,
+                    &poll.id,
+                    &group_id,
+                    UpdatedPoll {
+                        updated_at: poll.updated_at,
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            assert!(fetch_poll(&user_a, &poll.id).await.is_ok());
+
+            assert!(remove_group(&client, &group_id).await.is_ok());
 
             Ok(())
         });

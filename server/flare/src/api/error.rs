@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use hyper::header;
 use sea_orm::{DbErr, SqlErr, TransactionError};
-use tracing::{error, info};
+use tracing::error;
 
 /// An error for flare REST API.
 #[derive(Debug)]
@@ -10,6 +10,8 @@ pub struct RestError {
     code: StatusCode,
     msg: String,
 }
+
+// todo S might instead be an enum to make it easily match-able on the frontend
 
 impl RestError {
     /// Creates a new flare API REST error.
@@ -64,17 +66,18 @@ impl RestError {
     }
 
     /// Shorthand for creating a flare API REST error with `INTERNAL_SERVER_ERROR` status code.
+    /// The message is not sent to the client, only logged.
     #[track_caller]
     pub fn internal<S>(msg: S) -> Self
     where
-        S: Into<String> + std::fmt::Display,
+        S: std::fmt::Display,
     {
         error!(
             "internal error at {}: {}",
             std::panic::Location::caller(),
             msg
         );
-        RestError::new(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        RestError::new(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
     }
 }
 
@@ -95,11 +98,6 @@ impl IntoResponse for RestError {
 impl From<DbErr> for RestError {
     #[track_caller]
     fn from(error: DbErr) -> Self {
-        info!(
-            "Database error at {}: {:?}",
-            std::panic::Location::caller(),
-            error
-        );
         if let Some(sql_err) = error.sql_err() {
             if let SqlErr::UniqueConstraintViolation(_) = sql_err {
                 return RestError::conflict("Record already exists");
@@ -107,22 +105,31 @@ impl From<DbErr> for RestError {
         } else if let DbErr::RecordNotFound(_) = error {
             return RestError::not_found("Record not found");
         }
-        RestError::internal("Error while processing request".to_string())
+        RestError::internal(error)
     }
 }
 
 impl From<TransactionError<RestError>> for RestError {
     #[track_caller]
     fn from(value: TransactionError<RestError>) -> Self {
-        info!(
-            "Transaction error at {}: {:?}",
-            std::panic::Location::caller(),
-            value
-        );
         match value {
+            TransactionError::Connection(e) => e.into(),
             TransactionError::Transaction(e) => e,
-            _ => RestError::internal("Error while processing request".to_string()),
         }
+    }
+}
+
+impl From<std::io::Error> for RestError {
+    #[track_caller]
+    fn from(value: std::io::Error) -> Self {
+        RestError::internal(value)
+    }
+}
+
+impl From<botan::Error> for RestError {
+    #[track_caller]
+    fn from(value: botan::Error) -> Self {
+        RestError::internal(value)
     }
 }
 
@@ -138,12 +145,6 @@ impl FoundError {
     /// Creates a new flare API found error.
     #[track_caller]
     pub fn new(location: &str, msg: String) -> Self {
-        // todo this is logging
-        info!(
-            "Redirect to: {} from {}",
-            msg,
-            std::panic::Location::caller()
-        );
         FoundError {
             location: location.to_string(),
             msg,

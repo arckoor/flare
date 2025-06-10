@@ -1,11 +1,13 @@
 pub mod api;
 pub mod auth;
 pub mod config;
-mod crypto;
-mod db;
-mod logging;
-mod macros;
-mod store;
+pub mod crypto;
+pub mod db;
+pub mod logging;
+pub mod macros;
+pub mod store;
+pub mod tasks;
+pub mod time;
 
 use std::{
     net::{Ipv6Addr, SocketAddr},
@@ -26,17 +28,12 @@ pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
         logging::setup_tracing(router)
     };
 
-    // todo we probably don't want to log sqlx in production
-    #[cfg(not(feature = "sim"))]
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
-
     let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, server.port));
     let handle = Handle::new();
 
     tokio::spawn(graceful_shutdown(handle.clone()));
 
+    tracing::info!("Setup done, binding to port {:?}...", server.port);
     {
         #[cfg(not(feature = "sim"))]
         {
@@ -51,8 +48,7 @@ pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
     }
     .handle(handle)
     .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-    .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .await?;
 
     Ok(())
 }
@@ -76,6 +72,6 @@ async fn graceful_shutdown(handle: Handle) {
         _ = terminate => {},
     }
 
-    tracing::info!("Received shutdown signal, shutting down gracefully...");
+    tracing::info!("Shutting down...");
     handle.graceful_shutdown(Some(Duration::from_secs(30)));
 }

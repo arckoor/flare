@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-
 use reqwest::StatusCode;
 use sea_entity::sea_orm_active_enums::Permissions;
 use tokio::time::sleep;
 
 use flare_sim::helpers::{
-    Http, auth_ping, get, get_client, login, logins, logout, refresh, wait_for_api,
+    Http, auth_ping, get, get_client, login, logins, logout, post, refresh, wait_for_api,
 };
 use flare_sim::sim::DELAY;
 use flare_sim::test_builder::flare_test;
@@ -63,7 +61,7 @@ fn test_tokens() -> turmoil::Result {
                 2
             );
 
-            get(&client, "/api/logout")
+            post(&client, "/api/logout")
                 .bearer_auth(new_access_token.clone())
                 .send()
                 .await
@@ -120,56 +118,6 @@ fn test_basic_scenario() -> turmoil::Result {
             assert!(get(&client, "/api/docs/openapi.json").send().await.is_ok());
 
             assert!(logout(&mut client).await.is_ok());
-
-            Ok(())
-        });
-
-        sim.run()
-    })
-}
-
-#[test]
-fn test_oauth() -> turmoil::Result {
-    flare_test(|sim| {
-        sim.create_basic_scenario();
-
-        sim.client("client", async move {
-            // this doesn't really test oauth at all, but it's the best we can do
-            let client = get_client(0).await.0;
-
-            for provider in vec!["discord", "github"] {
-                assert_eq!(
-                    get(&client, &format!("/api/oauth/{provider}/login"))
-                        .send()
-                        .await
-                        .unwrap()
-                        .status(),
-                    StatusCode::FOUND
-                );
-
-                assert_eq!(
-                    get(&client, &format!("/api/oauth/{provider}/callback"))
-                        .send()
-                        .await
-                        .unwrap()
-                        .status(),
-                    StatusCode::FOUND
-                );
-
-                let query = [("code", "test_code"), ("state", "test_state")]
-                    .into_iter()
-                    .collect::<HashMap<_, _>>();
-
-                assert_eq!(
-                    get(&client, &format!("/api/oauth/{provider}/callback"))
-                        .query(&query)
-                        .send()
-                        .await
-                        .unwrap()
-                        .status(),
-                    StatusCode::FOUND
-                );
-            }
 
             Ok(())
         });

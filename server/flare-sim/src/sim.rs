@@ -1,9 +1,11 @@
 use std::future::Future;
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use flare::api::api_params::AddGroup;
-use tempfile::TempDir;
+use flare::db::Database;
+pub use tempfile::TempDir;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::prelude::*;
@@ -15,6 +17,7 @@ use flare::config::FlareConfig;
 
 pub const FLARE_SERVER: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
 pub const FLARE_PORT: u16 = 9000;
+pub const PG_URL: &'static str = concat!(env!("PG_BASE"), "/flare-db-test");
 pub const DELAY: Duration = Duration::from_secs(20);
 
 pub struct FlareSimulation<'a> {
@@ -66,14 +69,12 @@ impl<'a> FlareSimulation<'a> {
         std::fs::create_dir(&path).expect("Failed to create dir");
 
         self.host(FLARE_SERVER, move || {
-            let db_url = format!("{}/flare-db-test", env!("DATABASE_BASE"));
-
             let mut config = FlareConfig::default();
             config.store.storage.base_path = path.clone();
-            config.store.storage.database_url = db_url;
-            config.server.port = FLARE_PORT;
+            config.store.storage.postgres_url = PG_URL.to_string();
             config.store.storage.admin.github_id = None;
             config.store.storage.admin.discord_id = Some("admin".to_string());
+            config.server.port = FLARE_PORT;
 
             async move { flare::launch(config).await.map_err(|e| e.into()) }
         });
@@ -99,8 +100,8 @@ impl<'a> FlareSimulation<'a> {
 
     pub fn group_users(&mut self, group_name: &str, owner: usize, users: Vec<usize>) {
         let group_name = group_name.to_string();
-        self.client("group-users-client", async move {
-            let (mut owner_client, _) = helpers::get_client(owner).await;
+        self.client(format!("group-users-client-{}", group_name), async move {
+            let mut owner_client = helpers::get_client(owner).await.0;
 
             let group = helpers::add_group(&owner_client, AddGroup { name: group_name })
                 .await
@@ -125,8 +126,13 @@ impl<'a> FlareSimulation<'a> {
     }
 
     pub fn run(&mut self) -> Result {
-        // TODO there could be a run_to_end() that runs the sim, and once done attempts to delete all
-        // outstanding resources like polls, users, groups, in somewhat arbitrary order
         self.sim.run()
     }
+}
+
+/// Used for tests where direct access to the database is necessary
+pub async fn setup_db() -> Arc<Database> {
+    let mut config = FlareConfig::default();
+    config.store.storage.postgres_url = PG_URL.to_string();
+    Arc::new(Database::new(&config.store.storage).await)
 }

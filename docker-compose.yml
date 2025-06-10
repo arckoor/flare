@@ -14,7 +14,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      valkey:
         condition: service_healthy
   frontend:
     image: ghcr.io/arckoor/flare-frontend:latest
@@ -42,20 +42,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-  redis:
-    image: redis:7.2.4-alpine
-    container_name: flare-redis
+  valkey:
+    image: redis:8.1.0-alpine
+    container_name: flare-valkey
     restart: unless-stopped
     networks:
       - flare-network
     volumes:
-      - redis-data:/data
+      - valkey-data:/data
     healthcheck:
-      test: redis-cli ping | grep PONG
+      test: valkey-cli ping | grep PONG
       interval: 10s
       timeout: 5s
       retries: 5
-    command: redis-server --appendonly yes
+    command: valkey-server --appendonly yes
 
 
 networks:
@@ -64,4 +64,5 @@ networks:
 
 volumes:
   postgres-data:
-  redis-data:
+  valkey-data:
+  flare-data:

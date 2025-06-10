@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use sea_migration::{Migrator, MigratorTrait};
 use sea_orm::{
-    ActiveModelTrait, DatabaseConnection, Iterable, Set, TransactionTrait, entity::prelude::*,
+    ActiveModelTrait, ConnectOptions, DatabaseConnection, Iterable, Set, TransactionTrait,
+    entity::prelude::*,
 };
 
 use crate::{
@@ -11,16 +14,26 @@ use crate::{
 
 pub struct Database {
     pub sea: DatabaseConnection,
-    pub redis: redis::aio::MultiplexedConnection,
+    pub valkey: redis::aio::MultiplexedConnection,
 }
 
 impl Database {
     pub async fn new(config: &StorageConfig) -> Self {
-        let sea = sea_orm::Database::connect(&config.database_url)
+        let mut opt = ConnectOptions::new(&config.postgres_url);
+        opt.sqlx_slow_statements_logging_settings(
+            tracing::log::LevelFilter::Warn,
+            Duration::from_millis(100),
+        )
+        .acquire_timeout(Duration::from_secs(2));
+
+        #[cfg(not(feature = "sim"))]
+        opt.sqlx_logging_level(tracing::log::LevelFilter::Debug);
+
+        let sea = sea_orm::Database::connect(opt)
             .await
             .expect("Failed to create SeaORM connection");
 
-        let redis = redis::Client::open(config.redis_url.clone())
+        let valkey = redis::Client::open(config.valkey_url.clone())
             .expect("Failed to create Redis client")
             .get_multiplexed_async_connection()
             .await
@@ -34,7 +47,7 @@ impl Database {
                 .expect("Failed to reset database");
 
             redis::cmd("FLUSHDB")
-                .exec_async(&mut redis.clone())
+                .exec_async(&mut valkey.clone())
                 .await
                 .expect("Failed to flush Redis database");
         }
@@ -43,9 +56,9 @@ impl Database {
             .await
             .expect("Failed to migrate database");
 
-        Database::init_admin(config.admin.clone(), &sea).await;
+        Self::init_admin(config.admin.clone(), &sea).await;
 
-        Self { sea, redis }
+        Self { sea, valkey }
     }
 
     pub async fn get_or_create_or_link_oauth_user(
@@ -54,6 +67,7 @@ impl Database {
         provider: sea_entity::sea_orm_active_enums::OauthProvider,
         existing_user: Option<String>,
     ) -> Result<sea_entity::user::Model, RestError> {
+        // todo this should be FoundError with proper error codes
         let oauth_user = sea_entity::o_auth_user::Entity::find()
             .filter(
                 sea_orm::Condition::all()
@@ -64,7 +78,6 @@ impl Database {
             .one(&self.sea)
             .await?;
 
-        // TODO test this logic, am not sure about it just yet
         match oauth_user {
             Some((_, Some(user))) => {
                 if let Some(existing_user) = existing_user {
@@ -108,7 +121,10 @@ impl Database {
 
                 Ok(user)
             }
-            Some((_, None)) => unreachable!(),
+            Some((_, None)) => {
+                // if we're here our db has failed to uphold an fkey constraint and then we're screwed anyway
+                unreachable!()
+            }
         }
     }
 
@@ -123,48 +139,11 @@ impl Database {
             .add_option(group_id.map(|id| sea_entity::poll::Column::GroupId.eq(id)))
     }
 
-    pub fn filter_poll_by_id(
-        poll_id: &str,
-        user_id: &str,
-        groups: Vec<String>,
-    ) -> sea_orm::Condition {
-        sea_orm::Condition::all()
-            .add(sea_entity::poll::Column::Id.eq(poll_id))
-            .add(Database::filter_polls(user_id, groups, None))
-    }
-
-    pub fn filter_group_user(group_id: &str, user_id: &str) -> sea_orm::Condition {
-        sea_orm::Condition::all()
-            .add(sea_entity::group_user::Column::GroupId.eq(group_id))
-            .add(sea_entity::group_user::Column::UserId.eq(user_id))
-    }
-
-    pub fn filter_group_by_owner(group_id: &str, owner_id: &str) -> sea_orm::Condition {
-        sea_orm::Condition::all()
-            .add(sea_entity::group::Column::Id.eq(group_id))
-            .add(sea_entity::group::Column::OwnerId.eq(owner_id))
-    }
-
-    pub async fn remove_user_from_group<C>(
-        db: &C,
-        group: &str,
-        user: &str,
-        group_owner: &str,
-    ) -> Result<(), RestError>
+    pub async fn remove_user_from_group<C>(db: &C, group: &str, user: &str) -> Result<(), RestError>
     where
         C: ConnectionTrait,
     {
         sea_entity::group_user::Entity::delete_by_id((group.to_string(), user.to_string()))
-            .exec(db)
-            .await?;
-
-        sea_entity::poll::Entity::update_many()
-            .col_expr(sea_entity::poll::Column::OwnerId, Expr::value(group_owner))
-            .filter(
-                sea_orm::Condition::all()
-                    .add(sea_entity::poll::Column::OwnerId.eq(user.to_string()))
-                    .add(sea_entity::poll::Column::GroupId.eq(group)),
-            )
             .exec(db)
             .await?;
 
@@ -226,5 +205,3 @@ impl Database {
         .expect("Failed to init admin");
     }
 }
-
-// TODO pub struct Filters {} ?

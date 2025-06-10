@@ -1,0 +1,33 @@
+[store.storage]
+base_path = "./storage"
+postgres_url = "postgres://flare:12345@localhost:5432/flare-db"
+valkey_url = "redis://localhost:6379"
+
+[store.storage.admin]
+discord_id = "your-discord-id-if-any"
+github_id = "your-github-id-if-any"
+
+[store.jwt]
+access_expiry = "1h"
+refresh_expiry = "1d"
+access_passphrase = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" # botan rng --system --format=hex 64
+refresh_passphrase = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+domain = "localhost"
+
+[store.oauth]
+pkce_secret = "0000000000000000000000000000000000000000000000000000000000000000" # botan rng --system --format=hex 32
+login_url = "change-me"
+api_base = "https://localhost/api"
+user_agent = "change-me"
+
+[store.oauth.discord]
+client_id = "change-me"
+client_secret = "change-me"
+
+[store.oauth.github]
+client_id = "change-me"
+client_secret = "change-me"
+
+[server]
+port = 8080
+cert_path = "../certs"

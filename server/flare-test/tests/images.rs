@@ -4,7 +4,7 @@ use flare::api::api_params::AddPoll;
 use flare_sim::{
     helpers::{
         add_image, add_poll, fetch_image, fetch_poll, fetch_voting_image, get_client, jpg_images,
-        login, logins, logout, png_images, post, remove_image,
+        login, logins, logout, png_images, post, remove_image, upload_all_pngs,
     },
     test_builder::flare_test,
     turmoil,
@@ -95,7 +95,6 @@ fn test_add_image() -> turmoil::Result {
 
             for (image, mime) in png_images()
                 .into_iter()
-                .skip(1)
                 .map(|i| (i, "image/png"))
                 .chain(jpg_images().into_iter().map(|i| (i, "image/jpeg")))
             {
@@ -118,12 +117,7 @@ fn test_remove_image() -> turmoil::Result {
         sim.client("client", async move {
             let mut client = get_client(0).await.0;
 
-            // TODO this needs an upload helper here, and in all the other tests
-            let mut images = Vec::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime).await.unwrap();
-                images.push(uploaded.name.clone());
-            }
+            let images = upload_all_pngs(&client).await;
 
             logout(&mut client).await.unwrap();
             login(&mut client, &logins()[1]).await.unwrap();
@@ -151,11 +145,7 @@ fn test_remove_image() -> turmoil::Result {
                 );
             }
 
-            let mut images = HashSet::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime).await.unwrap();
-                images.insert(uploaded.name.clone());
-            }
+            let images = upload_all_pngs(&client).await;
 
             add_poll(
                 &client,
@@ -163,7 +153,7 @@ fn test_remove_image() -> turmoil::Result {
                     title: "test".to_string(),
                     info: "testing poll".to_string(),
                     ends: f64::MAX,
-                    images: images.clone(),
+                    images: HashSet::from_iter(images.iter().cloned()),
                     allowed_votes: 2,
                     group: None,
                 },
@@ -283,16 +273,7 @@ fn test_voting_image() -> turmoil::Result {
         sim.client("client", async move {
             let client = get_client(0).await.0;
 
-            let mut images = HashSet::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime)
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.insert(uploaded);
-            }
+            let images = upload_all_pngs(&client).await;
 
             add_poll(
                 &client,
@@ -301,7 +282,7 @@ fn test_voting_image() -> turmoil::Result {
                     info: "test".to_string(),
                     ends: f64::MAX,
                     allowed_votes: 3,
-                    images: images.clone(),
+                    images: HashSet::from_iter(images.iter().cloned()),
                     group: None,
                 },
             )
@@ -338,16 +319,7 @@ fn test_group_image() -> turmoil::Result {
             let client = get_client(0).await.0;
             let other_client = get_client(1).await.0;
 
-            let mut images = HashSet::new();
-            for (image, mime) in png_images().into_iter().map(|i| (i, "image/png")) {
-                let uploaded = add_image(&client, image, mime)
-                    .await
-                    .unwrap()
-                    .name
-                    .to_string();
-
-                images.insert(uploaded);
-            }
+            let images = upload_all_pngs(&client).await;
 
             for image in images.iter() {
                 assert!(fetch_image(&client, image).await.is_ok());
@@ -364,7 +336,7 @@ fn test_group_image() -> turmoil::Result {
                     title: "test".to_string(),
                     info: "i belong to a group!".to_string(),
                     ends: f64::MAX,
-                    images: images.clone(),
+                    images: HashSet::from_iter(images.iter().cloned()),
                     allowed_votes: 2,
                     group: Some(client.get_groups()[0].clone()),
                 },

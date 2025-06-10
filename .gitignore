@@ -1,5 +1,5 @@
+.direnv
 .nix-shell
-!.vscode/extension.json
 .vscode/
 target
 server/storage

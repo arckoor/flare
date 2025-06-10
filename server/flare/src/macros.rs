@@ -1,14 +1,14 @@
 #[macro_export]
 macro_rules! requires {
-	($store:expr, $auth:expr $(, $($perm:expr),*)?) => {
-		$store.jwt.validate($auth, vec![$($($perm),*)?]).await
-	};
+    ($store:expr, $auth:expr $(, $($perm:expr),*)?) => {
+        $store.jwt.validate($auth, &[$($($perm),*)?]).await
+    };
 }
 
 #[macro_export]
 macro_rules! validate_text {
     ($($text:expr),* $(,)?) => {
-        validate_user_text(vec![$($text),*])?
+        validate_user_text(&[$($text),*])?
     };
 }
 

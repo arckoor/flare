@@ -57,8 +57,16 @@ fn test_groups() -> turmoil::Result {
                 .await
                 .unwrap();
 
+            // already invited
+            assert!(
+                add_group_user(&client, &group.id, &user_a_id)
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::CONFLICT))
+            );
+
             join_group(&user_a, &group.id).await.unwrap();
 
+            // joined, now our access token is revoked
             assert!(
                 auth_ping(&user_a)
                     .await
@@ -87,6 +95,7 @@ fn test_groups() -> turmoil::Result {
                 .await
                 .unwrap();
 
+            // again access token is revoked
             assert!(
                 auth_ping(&user_b)
                     .await
@@ -103,6 +112,7 @@ fn test_groups() -> turmoil::Result {
                 EditGroup {
                     name: Some("test-group-edited".to_string()),
                     owner: Some(user_a_id.clone()),
+                    updated_at: group.updated_at,
                 },
             )
             .await
@@ -112,17 +122,34 @@ fn test_groups() -> turmoil::Result {
             assert!(fetched_group.owner == user_a_id);
             assert!(fetched_group.members.len() == 2);
 
+            // we are no longer the owner
             assert!(
                 edit_group(
                     &client,
                     &group.id,
                     EditGroup {
                         name: Some("this-doesn't-work".to_string()),
-                        owner: None
+                        owner: None,
+                        updated_at: group.updated_at,
                     }
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+            );
+
+            // editing with the correct user, but not re-fetched since update
+            assert!(
+                edit_group(
+                    &user_a,
+                    &group.id,
+                    EditGroup {
+                        name: Some("test".to_string()),
+                        owner: None,
+                        updated_at: group.updated_at
+                    }
+                )
+                .await
+                .is_err_and(|e| e.status() == Some(StatusCode::CONFLICT))
             );
 
             add_group_user(&user_a, &group.id, &user_b_id)
@@ -192,6 +219,23 @@ fn test_group_errors() -> turmoil::Result {
 
             let group_id = client.get_groups()[0].clone();
 
+            let group = fetch_group(&client, &group_id).await.unwrap();
+
+            // setting yourself as owner again doesn't hurt
+            assert!(
+                edit_group(
+                    &client,
+                    &group_id,
+                    EditGroup {
+                        name: None,
+                        owner: Some(client_id.clone()),
+                        updated_at: group.updated_at,
+                    }
+                )
+                .await
+                .is_ok()
+            );
+
             assert!(
                 add_group(
                     &client,
@@ -215,19 +259,8 @@ fn test_group_errors() -> turmoil::Result {
                     &group_id,
                     EditGroup {
                         name: None,
-                        owner: Some(client_id.clone())
-                    }
-                )
-                .await
-                .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
-            );
-            assert!(
-                edit_group(
-                    &client,
-                    &group_id,
-                    EditGroup {
-                        name: None,
-                        owner: Some("abc".to_string())
+                        owner: Some("abc".to_string()),
+                        updated_at: 0.0,
                     }
                 )
                 .await
@@ -239,7 +272,8 @@ fn test_group_errors() -> turmoil::Result {
                     &group_id,
                     EditGroup {
                         name: Some("<script>alert('xss')</script>".to_string()),
-                        owner: None
+                        owner: None,
+                        updated_at: 0.0,
                     }
                 )
                 .await

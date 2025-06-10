@@ -1,5 +1,9 @@
 use extension::postgres::Type;
-use sea_orm_migration::{prelude::*, schema::*};
+use sea_orm_migration::{
+    prelude::*,
+    schema::*,
+    sea_orm::{DbBackend, Statement},
+};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -7,9 +11,6 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // todo: updated_at for basically everything. this is going to involve raw triggers
-        // https://github.com/SeaQL/sea-orm/discussions/2027
-
         // TODO each of these needs an index (or multiple)
         // e.g. .index(Index::create().unique().name("idx-user-id").col(User::Id)) //though no need for indexes on unique / primary cols obviously
 
@@ -54,6 +55,7 @@ impl MigrationTrait for Migration {
                         },
                     ))
                     .col(double(User::CreatedAt).default(current_ts.clone()))
+                    .col(double(User::UpdatedAt).default(current_ts.clone()))
                     .to_owned(),
             )
             .await?;
@@ -66,7 +68,7 @@ impl MigrationTrait for Migration {
                     .primary_key(
                         Index::create()
                             .col(OAuthUser::UserId)
-                            .col(OAuthUser::ProviderUserId),
+                            .col(OAuthUser::Provider),
                     )
                     .col(string(OAuthUser::UserId).not_null())
                     .col(string(OAuthUser::ProviderUserId).not_null())
@@ -96,6 +98,7 @@ impl MigrationTrait for Migration {
                     .col(string(Group::OwnerId))
                     .col(string(Group::Name).not_null())
                     .col(double(Group::CreatedAt).default(current_ts.clone()))
+                    .col(double(Group::UpdatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
                             .from(Group::Table, Group::OwnerId)
@@ -178,11 +181,13 @@ impl MigrationTrait for Migration {
                     .col(string(Poll::Title)) // TODO string_len?
                     .col(string(Poll::Info))
                     .col(double(Poll::Ends))
+                    .col(boolean(Poll::Locked).default(false))
                     .col(boolean(Poll::ResultsPublic).default(false))
                     .col(integer(Poll::AllowedVotes))
                     .col(string_null(Poll::GroupId))
-                    .col(string(Poll::OwnerId))
+                    .col(string_null(Poll::OwnerId))
                     .col(double(Poll::CreatedAt).default(current_ts.clone()))
+                    .col(double(Poll::UpdatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
                             .from(Poll::Table, Poll::GroupId)
@@ -227,14 +232,23 @@ impl MigrationTrait for Migration {
                     .table(Image::Table)
                     .if_not_exists()
                     .col(string(Image::Id).primary_key())
-                    .col(string(Image::AspectRatio))
                     .col(string(Image::Mime))
-                    .col(string(Image::UserId))
+                    .col(string(Image::AspectRatio))
+                    .col(string_len(Image::Hash, 128))
+                    .col(string_null(Poll::GroupId))
+                    .col(string_null(Poll::OwnerId))
                     .col(string_null(Image::PollId))
                     .col(double(Image::CreatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
-                            .from(Image::Table, Image::UserId)
+                            .from(Image::Table, Image::GroupId)
+                            .to(Group::Table, Group::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(Image::Table, Image::OwnerId)
                             .to(User::Table, User::Id)
                             .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
@@ -278,6 +292,7 @@ impl MigrationTrait for Migration {
                     .col(string_len(EphemeralUser::Cookie, 24))
                     .col(string_len(EphemeralUser::Ip, 128))
                     .col(double(EphemeralUser::CreatedAt).default(current_ts.clone()))
+                    .col(double(EphemeralUser::LastSeenAt).default(current_ts.clone()))
                     .to_owned(),
             )
             .await?;
@@ -313,10 +328,59 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        let db = manager.get_connection();
+        db.execute(Statement::from_string(
+            DbBackend::Postgres,
+            "
+                CREATE OR REPLACE FUNCTION set_updated_at()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    NEW.updated_at = EXTRACT(epoch FROM now());
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+                ",
+        ))
+        .await?;
+
+        for table in [
+            User::Table.to_string(),
+            Group::Table.to_string(),
+            Poll::Table.to_string(),
+        ] {
+            db.execute(Statement::from_string(
+                DbBackend::Postgres,
+                format!(
+                    r#"
+                    CREATE OR REPLACE TRIGGER updated_at
+                    BEFORE UPDATE ON "{}"
+                    FOR EACH ROW
+                    EXECUTE FUNCTION set_updated_at();
+                    "#,
+                    table
+                ),
+            ))
+            .await?;
+        }
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+
+        for table in [
+            User::Table.to_string(),
+            Group::Table.to_string(),
+            Poll::Table.to_string(),
+        ] {
+            db.execute(Statement::from_string(
+                DbBackend::Postgres,
+                format!(r#"DROP TRIGGER IF EXISTS updated_at ON "{}";"#, table),
+            ))
+            .await?;
+        }
+
         manager
             .drop_table(
                 Table::drop()
@@ -369,19 +433,20 @@ enum OAuthProvider {
 }
 
 #[derive(DeriveIden)]
-enum OAuthUser {
-    Table,
-    UserId,
-    Provider,
-    ProviderUserId,
-    CreatedAt,
-}
-
-#[derive(DeriveIden)]
 enum User {
     Table,
     Id,
     Permissions,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum OAuthUser {
+    Table,
+    UserId,
+    ProviderUserId,
+    Provider,
     CreatedAt,
 }
 
@@ -389,9 +454,10 @@ enum User {
 enum Group {
     Table,
     Id,
-    Name,
     OwnerId,
+    Name,
     CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
@@ -417,11 +483,13 @@ enum Poll {
     Title,
     Info,
     Ends,
+    Locked,
     ResultsPublic,
     AllowedVotes,
     GroupId,
     OwnerId,
     CreatedAt,
+    UpdatedAt,
 }
 
 #[derive(DeriveIden)]
@@ -430,7 +498,9 @@ enum Image {
     Id,
     Mime,
     AspectRatio,
-    UserId,
+    Hash,
+    GroupId,
+    OwnerId,
     PollId,
     CreatedAt,
 }
@@ -450,6 +520,7 @@ enum EphemeralUser {
     Cookie,
     Ip,
     CreatedAt,
+    LastSeenAt,
 }
 
 #[derive(DeriveIden)]

@@ -9,9 +9,9 @@ use tracing::info;
 use crate::sim::{FLARE_PORT, FLARE_SERVER};
 use flare::{
     api::api_params::{
-        AddGroup, AddPoll, AddedPoll, EditGroup, EditPoll, FetchPoll, FetchPollSort, FetchPolls,
-        FetchResults, FetchVote, FetchVoteResults, FetchVotingPoll, Group, LoginInfo, Paginator,
-        PublishResults, TokenResponse, UploadedImage, Vote,
+        AddGroup, AddPoll, EditGroup, EditPoll, FetchGroup, FetchPoll, FetchPollSort, FetchPolls,
+        FetchResults, FetchVote, FetchVoteResults, FetchVotingPoll, LoginInfo, Paginator,
+        PublishResults, TokenResponse, UpdatedPoll, UploadedImage, UserInfo, Vote,
     },
     auth::jwt::AccessClaims,
 };
@@ -61,16 +61,16 @@ impl Http {
         }
     }
 
-    pub fn get_groups(&self) -> Vec<String> {
-        self.bearer
-            .as_ref()
-            .map_or_else(Vec::new, |bearer| self.decode_claims(bearer).groups)
-    }
-
     pub fn get_permissions(&self) -> Vec<Permissions> {
         self.bearer
             .as_ref()
             .map_or_else(Vec::new, |bearer| self.decode_claims(bearer).permissions)
+    }
+
+    pub fn get_groups(&self) -> Vec<String> {
+        self.bearer
+            .as_ref()
+            .map_or_else(Vec::new, |bearer| self.decode_claims(bearer).groups)
     }
 
     fn decode_claims(&self, bearer: &str) -> AccessClaims {
@@ -286,6 +286,37 @@ pub async fn wait_for_api(client: &Http) {
     info!("API is up after {} checks", i);
 }
 
+pub async fn upload_all_pngs(client: &Http) -> Vec<String> {
+    upload_many_images(
+        &client,
+        &png_images()[..]
+            .into_iter()
+            .map(|i| (*i, "image/png"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+}
+
+pub async fn upload_many_pngs(client: &Http, start: usize, stop: usize) -> Vec<String> {
+    upload_many_images(
+        &client,
+        &png_images()[start..stop]
+            .into_iter()
+            .map(|i| (*i, "image/png"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+}
+
+pub async fn upload_many_images(client: &Http, images: &[(&[u8], &str)]) -> Vec<String> {
+    let mut imgs = Vec::new();
+    for (image, mime) in images {
+        let uploaded = add_image(&client, image, mime).await.unwrap();
+        imgs.push(uploaded.name.clone());
+    }
+    imgs
+}
+
 pub async fn auth_ping(client: &Http) -> Result<(), reqwest::Error> {
     let _ = get(client, "/api/auth-ping").send().await?;
     Ok(())
@@ -306,15 +337,32 @@ pub async fn login(
 }
 
 pub async fn refresh(client: &mut Http) -> Result<TokenResponse, reqwest::Error> {
-    let res = req(client, "/api/refresh").await;
+    let res = post(client, "/api/refresh")
+        .send()
+        .await?
+        .json::<TokenResponse>()
+        .await;
     client.capture_bearer(&res);
     res
 }
 
-/// This function assumes a client with a captured bearer token
+pub async fn user_info(client: &Http) -> Result<UserInfo, reqwest::Error> {
+    get(client, "/api/user")
+        .send()
+        .await?
+        .json::<UserInfo>()
+        .await
+}
+
 pub async fn logout(client: &mut Http) -> Result<(), reqwest::Error> {
-    let res = get(client, "/api/logout").send().await;
+    let res = post(client, "/api/logout").send().await;
     client.clear_bearer(&res);
+    res?;
+    Ok(())
+}
+
+pub async fn remove_user(client: &Http) -> Result<(), reqwest::Error> {
+    delete(client, "/api/user").send().await?;
     Ok(())
 }
 
@@ -348,14 +396,12 @@ pub async fn add_image(
 }
 
 pub async fn remove_image(client: &Http, name: &str) -> Result<(), reqwest::Error> {
-    delete(client, &format!("/api/image/{}", name))
-        .send()
-        .await?;
+    delete(client, &format!("/api/image/{name}")).send().await?;
     Ok(())
 }
 
 pub async fn fetch_poll(client: &Http, poll_id: &str) -> Result<FetchPoll, reqwest::Error> {
-    req(client, &format!("/api/poll/{}", poll_id)).await
+    req(client, &format!("/api/poll/{poll_id}")).await
 }
 
 pub async fn fetch_polls(
@@ -369,12 +415,12 @@ pub async fn fetch_polls(
     res.send().await?.json::<FetchPolls>().await
 }
 
-pub async fn add_poll(client: &Http, add_poll: AddPoll) -> Result<AddedPoll, reqwest::Error> {
+pub async fn add_poll(client: &Http, add_poll: AddPoll) -> Result<FetchPoll, reqwest::Error> {
     post(client, "/api/poll")
         .json(&add_poll)
         .send()
         .await?
-        .json::<AddedPoll>()
+        .json::<FetchPoll>()
         .await
 }
 
@@ -382,21 +428,35 @@ pub async fn edit_poll(
     client: &Http,
     poll_id: &str,
     edit_poll: EditPoll,
-) -> Result<(), reqwest::Error> {
-    patch(client, &format!("/api/poll/{}", poll_id))
+) -> Result<FetchPoll, reqwest::Error> {
+    patch(client, &format!("/api/poll/{poll_id}"))
         .json(&edit_poll)
+        .send()
+        .await?
+        .json::<FetchPoll>()
+        .await
+}
+
+pub async fn remove_poll(client: &Http, poll_id: &str) -> Result<(), reqwest::Error> {
+    delete(client, &format!("/api/poll/{poll_id}"))
         .send()
         .await?;
 
     Ok(())
 }
 
-pub async fn remove_poll(client: &Http, poll_id: &str) -> Result<(), reqwest::Error> {
-    delete(client, &format!("/api/poll/{}", poll_id))
+pub async fn add_poll_to_group(
+    client: &Http,
+    poll_id: &str,
+    group_id: &str,
+    updated_poll: UpdatedPoll,
+) -> Result<UpdatedPoll, reqwest::Error> {
+    patch(client, &format!("/api/poll/{poll_id}/{group_id}"))
+        .json(&updated_poll)
         .send()
-        .await?;
-
-    Ok(())
+        .await?
+        .json::<UpdatedPoll>()
+        .await
 }
 
 pub async fn fetch_results(client: &Http, poll_id: &str) -> Result<FetchResults, reqwest::Error> {
@@ -407,17 +467,17 @@ pub async fn publish_results(
     client: &Http,
     poll_id: &str,
     publish_results: PublishResults,
-) -> Result<(), reqwest::Error> {
-    post(client, &format!("/api/poll/{}/results", poll_id))
+) -> Result<UpdatedPoll, reqwest::Error> {
+    post(client, &format!("/api/poll/{poll_id}/results"))
         .json(&publish_results)
         .send()
-        .await?;
-
-    Ok(())
+        .await?
+        .json::<UpdatedPoll>()
+        .await
 }
 
 pub async fn join_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {
-    post(client, &format!("/api/group/{}", group_id))
+    post(client, &format!("/api/group/{group_id}"))
         .send()
         .await?;
 
@@ -425,24 +485,24 @@ pub async fn join_group(client: &Http, group_id: &str) -> Result<(), reqwest::Er
 }
 
 pub async fn leave_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {
-    delete(client, &format!("/api/group/{}", group_id))
+    delete(client, &format!("/api/group/{group_id}"))
         .send()
         .await?;
 
     Ok(())
 }
 
-pub async fn add_group(client: &Http, add_group: AddGroup) -> Result<Group, reqwest::Error> {
+pub async fn add_group(client: &Http, add_group: AddGroup) -> Result<FetchGroup, reqwest::Error> {
     post(client, "/api/groups")
         .json(&add_group)
         .send()
         .await?
-        .json::<Group>()
+        .json::<FetchGroup>()
         .await
 }
 
-pub async fn fetch_group(client: &Http, group_id: &str) -> Result<Group, reqwest::Error> {
-    req(client, &format!("/api/groups/{}", group_id)).await
+pub async fn fetch_group(client: &Http, group_id: &str) -> Result<FetchGroup, reqwest::Error> {
+    req(client, &format!("/api/groups/{group_id}")).await
 }
 
 pub async fn edit_group(
@@ -450,7 +510,7 @@ pub async fn edit_group(
     group_id: &str,
     edit_group: EditGroup,
 ) -> Result<(), reqwest::Error> {
-    patch(client, &format!("/api/groups/{}", group_id))
+    patch(client, &format!("/api/groups/{group_id}"))
         .json(&edit_group)
         .send()
         .await?;
@@ -459,7 +519,7 @@ pub async fn edit_group(
 }
 
 pub async fn remove_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {
-    delete(client, &format!("/api/groups/{}", group_id))
+    delete(client, &format!("/api/groups/{group_id}"))
         .send()
         .await?;
 
@@ -471,12 +531,9 @@ pub async fn add_group_user(
     group_id: &str,
     user_id: &str,
 ) -> Result<(), reqwest::Error> {
-    post(
-        client,
-        &format!("/api/groups/{}/user/{}", group_id, user_id),
-    )
-    .send()
-    .await?;
+    post(client, &format!("/api/groups/{group_id}/{user_id}"))
+        .send()
+        .await?;
 
     Ok(())
 }
@@ -486,18 +543,15 @@ pub async fn remove_group_user(
     group_id: &str,
     user_id: &str,
 ) -> Result<(), reqwest::Error> {
-    delete(
-        client,
-        &format!("/api/groups/{}/user/{}", group_id, user_id),
-    )
-    .send()
-    .await?;
+    delete(client, &format!("/api/groups/{group_id}/{user_id}"))
+        .send()
+        .await?;
 
     Ok(())
 }
 
 pub async fn fetch_voting_image(client: &Http, image_id: &str) -> Result<Vec<u8>, reqwest::Error> {
-    get(client, &format!("/api/v/image/{}", image_id))
+    get(client, &format!("/api/v/image/{image_id}"))
         .send()
         .await?
         .bytes()
@@ -509,15 +563,15 @@ pub async fn fetch_voting_poll(
     client: &Http,
     poll_id: &str,
 ) -> Result<FetchVotingPoll, reqwest::Error> {
-    req(client, &format!("/api/v/poll/{}", poll_id)).await
+    req(client, &format!("/api/v/poll/{poll_id}")).await
 }
 
 pub async fn fetch_vote(client: &Http, poll_id: &str) -> Result<FetchVote, reqwest::Error> {
-    req(client, &format!("/api/v/poll/{}/vote", poll_id)).await
+    req(client, &format!("/api/v/poll/{poll_id}/vote")).await
 }
 
 pub async fn vote(client: &Http, poll_id: &str, vote: Vote) -> Result<(), reqwest::Error> {
-    post(client, &format!("/api/v/poll/{}/vote", poll_id))
+    post(client, &format!("/api/v/poll/{poll_id}/vote"))
         .json(&vote)
         .send()
         .await?;
@@ -529,5 +583,5 @@ pub async fn fetch_voting_results(
     client: &Http,
     poll_id: &str,
 ) -> Result<FetchVoteResults, reqwest::Error> {
-    req(client, &format!("/api/v/poll/{}/results", poll_id)).await
+    req(client, &format!("/api/v/poll/{poll_id}/results")).await
 }

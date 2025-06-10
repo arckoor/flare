@@ -4,7 +4,9 @@ use oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, 
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
-use crate::{api::error::FoundError, config::OAuthConfig, crypto::PkceCipher, db::Database};
+use crate::{
+    api::error::FoundError, config::OAuthConfig, crypto::Cipher, db::Database, time::ONE_MINUTE,
+};
 
 use super::providers::{OAuthProvider, discord::DiscordOAuth, github::GithubOAuth};
 
@@ -15,18 +17,18 @@ pub struct OAuthState {
     existing_user: Option<String>,
 }
 
-pub struct Providers {
-    pub discord: OAuth<DiscordOAuth>,
-    pub github: OAuth<GithubOAuth>,
+pub struct OAuth {
+    pub discord: Provider<DiscordOAuth>,
+    pub github: Provider<GithubOAuth>,
     login_url: String,
 }
 
-impl Providers {
+impl OAuth {
     pub fn new(config: &OAuthConfig, db: Arc<Database>) -> Self {
-        let http_client = Providers::build_http_client(&config.user_agent);
+        let http_client = OAuth::build_http_client(&config.user_agent);
 
-        let discord = OAuth::new(config, db.clone(), http_client.clone());
-        let github = OAuth::new(config, db.clone(), http_client);
+        let discord = Provider::new(config, db.clone(), http_client.clone());
+        let github = Provider::new(config, db.clone(), http_client);
 
         Self {
             discord,
@@ -48,18 +50,18 @@ impl Providers {
     }
 }
 
-pub struct OAuth<T: OAuthProvider> {
+pub struct Provider<T: OAuthProvider> {
     provider: T,
-    pkce_cipher: PkceCipher,
+    pkce_cipher: Cipher,
     login_url: String,
     db: Arc<Database>,
 }
 
-impl<T: OAuthProvider> OAuth<T> {
+impl<T: OAuthProvider> Provider<T> {
     pub fn new(config: &OAuthConfig, db: Arc<Database>, http_client: reqwest::Client) -> Self {
         let provider = T::new(config, http_client);
 
-        let pkce_cipher = PkceCipher::new(&config.pkce_secret);
+        let pkce_cipher = Cipher::new(&config.pkce_secret);
         Self {
             provider,
             pkce_cipher,
@@ -69,7 +71,7 @@ impl<T: OAuthProvider> OAuth<T> {
     }
 
     fn state_key(&self, csrf: &str) -> String {
-        format!("oauth:{}:{}", self.provider.key(), csrf)
+        format!("oauth:{}:{}", self.provider.identifier(), csrf)
     }
 
     pub async fn auth_url(
@@ -78,7 +80,10 @@ impl<T: OAuthProvider> OAuth<T> {
         existing_user: Option<String>,
     ) -> Result<Url, FoundError> {
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let encrypted_pkce_verifier = self.pkce_cipher.encrypt(pkce_verifier.secret().as_bytes());
+        let encrypted_pkce_verifier = self
+            .pkce_cipher
+            .encrypt(pkce_verifier.secret().as_bytes())
+            .map_err(|_| FoundError::new(&self.login_url, "".to_string()))?;
 
         let csrf_token = CsrfToken::new_random();
 
@@ -91,12 +96,12 @@ impl<T: OAuthProvider> OAuth<T> {
 
         // TODO errors need to include an actual error type
         self.db
-            .redis
+            .valkey
             .clone()
             .set_ex::<_, _, ()>(
                 state_key,
                 serde_json::to_string(&state).expect("Failed to serialize OAuthState"),
-                60 * 5,
+                (ONE_MINUTE as u64) * 5,
             )
             .await
             .map_err(|_| FoundError::new(&self.login_url, "".to_string()))?;
@@ -111,22 +116,27 @@ impl<T: OAuthProvider> OAuth<T> {
     ) -> Result<(String, String, Option<String>), FoundError> {
         let state_key = self.state_key(&state);
 
+        // TODO error needs to include actual error type
+        // also we should be very careful what we tell the user went wrong, a generic "an error occurred" is probably best here
+
         let state: String = self
             .db
-            .redis
+            .valkey
             .clone()
             .get_del(&state_key)
             .await
             .map_err(|_| FoundError::new(&self.login_url, "err in state".to_string()))?;
 
-        let oauth_state: OAuthState =
-            serde_json::from_str(&state).expect("Failed to parse OAuthState");
+        let oauth_state =
+            serde_json::from_str::<OAuthState>(&state).expect("Failed to parse OAuthState");
 
-        let decrypted_verifier =
-            String::from_utf8(self.pkce_cipher.decrypt(&oauth_state.pkce_verifier))
-                .expect("Failed to decrypt verifier");
+        let decrypted_verifier = String::from_utf8(
+            self.pkce_cipher
+                .decrypt(&oauth_state.pkce_verifier)
+                .map_err(|_| FoundError::new(&self.login_url, "err in decrypt".to_string()))?,
+        )
+        .expect("Failed to decrypt verifier");
 
-        // TODO error needs to include actual error type
         let access = self
             .provider
             .client()
