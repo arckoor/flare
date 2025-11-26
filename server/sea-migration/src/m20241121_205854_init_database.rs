@@ -24,6 +24,8 @@ impl MigrationTrait for Migration {
                         Permissions::Admin,
                         Permissions::ManageGroups,
                         Permissions::ManagePolls,
+                        Permissions::ManageScheduledPolls,
+                        Permissions::ApproveScheduledPollSubmissions,
                     ])
                     .to_owned(),
             )
@@ -70,8 +72,8 @@ impl MigrationTrait for Migration {
                             .col(OAuthUser::UserId)
                             .col(OAuthUser::Provider),
                     )
-                    .col(string(OAuthUser::UserId).not_null())
-                    .col(string(OAuthUser::ProviderUserId).not_null())
+                    .col(string(OAuthUser::UserId))
+                    .col(string(OAuthUser::ProviderUserId))
                     .col(
                         ColumnDef::new(OAuthUser::Provider)
                             .custom(OAuthProvider::Enum)
@@ -96,7 +98,7 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(string(Group::Id).primary_key())
                     .col(string(Group::OwnerId))
-                    .col(string(Group::Name).not_null())
+                    .col(string(Group::Name))
                     .col(double(Group::CreatedAt).default(current_ts.clone()))
                     .col(double(Group::UpdatedAt).default(current_ts.clone()))
                     .foreign_key(
@@ -120,8 +122,8 @@ impl MigrationTrait for Migration {
                             .col(GroupUser::GroupId)
                             .col(GroupUser::UserId),
                     )
-                    .col(string(GroupUser::GroupId).not_null())
-                    .col(string(GroupUser::UserId).not_null())
+                    .col(string(GroupUser::GroupId))
+                    .col(string(GroupUser::UserId))
                     .col(double(GroupUser::CreatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
@@ -151,8 +153,8 @@ impl MigrationTrait for Migration {
                             .col(GroupJoinRequest::GroupId)
                             .col(GroupJoinRequest::UserId),
                     )
-                    .col(string(GroupJoinRequest::GroupId).not_null())
-                    .col(string(GroupJoinRequest::UserId).not_null())
+                    .col(string(GroupJoinRequest::GroupId))
+                    .col(string(GroupJoinRequest::UserId))
                     .col(double(GroupJoinRequest::CreatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
@@ -175,17 +177,57 @@ impl MigrationTrait for Migration {
         manager
             .create_table(
                 Table::create()
+                    .table(ScheduledPoll::Table)
+                    .if_not_exists()
+                    .col(string(ScheduledPoll::Id).primary_key())
+                    .col(string(ScheduledPoll::Name))
+                    .col(double(ScheduledPoll::NextOccurrence))
+                    .col(double(ScheduledPoll::Cutoff))
+                    .col(json_binary_null(ScheduledPoll::RecurrenceRule))
+                    .col(integer_null(ScheduledPoll::SubmissionLimit))
+                    .col(boolean(ScheduledPoll::NeedsApproval))
+                    .col(boolean(ScheduledPoll::RejectDuplicates))
+                    .col(string(ScheduledPoll::TitleTemplate))
+                    .col(text(ScheduledPoll::Info))
+                    .col(integer(ScheduledPoll::VotingLimit))
+                    .col(double(ScheduledPoll::VotingDuration))
+                    .col(string_null(ScheduledPoll::GroupId))
+                    .col(string_null(ScheduledPoll::OwnerId))
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(ScheduledPoll::Table, ScheduledPoll::GroupId)
+                            .to(Group::Table, Group::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(ScheduledPoll::Table, ScheduledPoll::OwnerId)
+                            .to(User::Table, User::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .col(double(ScheduledPoll::CreatedAt).default(current_ts.clone()))
+                    .col(double(ScheduledPoll::UpdatedAt).default(current_ts.clone()))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
                     .table(Poll::Table)
                     .if_not_exists()
                     .col(string(Poll::Id).primary_key())
                     .col(string(Poll::Title)) // TODO string_len?
-                    .col(string(Poll::Info))
+                    .col(text(Poll::Info))
                     .col(double(Poll::Ends))
                     .col(boolean(Poll::Locked).default(false))
                     .col(boolean(Poll::ResultsPublic).default(false))
-                    .col(integer(Poll::AllowedVotes))
+                    .col(integer(Poll::VotingLimit))
                     .col(string_null(Poll::GroupId))
                     .col(string_null(Poll::OwnerId))
+                    .col(string_null(Poll::ScheduledPollId))
                     .col(double(Poll::CreatedAt).default(current_ts.clone()))
                     .col(double(Poll::UpdatedAt).default(current_ts.clone()))
                     .foreign_key(
@@ -199,6 +241,13 @@ impl MigrationTrait for Migration {
                         ForeignKey::create()
                             .from(Poll::Table, Poll::OwnerId)
                             .to(User::Table, User::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(Poll::Table, Poll::ScheduledPollId)
+                            .to(ScheduledPoll::Table, ScheduledPoll::Id)
                             .on_delete(ForeignKeyAction::Restrict)
                             .on_update(ForeignKeyAction::Cascade),
                     )
@@ -226,6 +275,8 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // TODO if we use a join table from the scheduled poll to the image,
+        // info like ApprovedById can be stored there instead
         manager
             .create_table(
                 Table::create()
@@ -258,6 +309,39 @@ impl MigrationTrait for Migration {
                             .from(Image::Table, Image::PollId)
                             .to(Poll::Table, Poll::Id)
                             .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(ScheduledImage::Table)
+                    .if_not_exists()
+                    .primary_key(
+                        Index::create()
+                            .col(ScheduledImage::ScheduledPollId)
+                            .col(ScheduledImage::ImageId),
+                    )
+                    .col(string(ScheduledImage::ScheduledPollId))
+                    .col(string(ScheduledImage::ImageId))
+                    .col(double(ScheduledImage::NextOccurrence))
+                    .col(boolean(ScheduledImage::Approved))
+                    .col(double(ScheduledImage::CreatedAt).default(current_ts.clone()))
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(ScheduledImage::Table, ScheduledImage::ScheduledPollId)
+                            .to(ScheduledPoll::Table, ScheduledPoll::Id)
+                            .on_delete(ForeignKeyAction::Restrict)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(ScheduledImage::Table, ScheduledImage::ImageId)
+                            .to(Image::Table, Image::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
                             .on_update(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -307,8 +391,8 @@ impl MigrationTrait for Migration {
                             .col(EphemeralUserVote::VoteId)
                             .col(EphemeralUserVote::EphemeralUserId),
                     )
-                    .col(integer(EphemeralUserVote::VoteId).not_null())
-                    .col(integer(EphemeralUserVote::EphemeralUserId).not_null())
+                    .col(integer(EphemeralUserVote::VoteId))
+                    .col(integer(EphemeralUserVote::EphemeralUserId))
                     .col(double(EphemeralUserVote::CreatedAt).default(current_ts.clone()))
                     .foreign_key(
                         ForeignKey::create()
@@ -331,15 +415,15 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
         db.execute(Statement::from_string(
             DbBackend::Postgres,
-            "
-                CREATE OR REPLACE FUNCTION set_updated_at()
-                RETURNS TRIGGER AS $$
-                BEGIN
-                    NEW.updated_at = EXTRACT(epoch FROM now());
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
-                ",
+            r#"
+            CREATE OR REPLACE FUNCTION set_updated_at()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                NEW.updated_at = EXTRACT(epoch FROM now());
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            "#,
         ))
         .await?;
 
@@ -347,17 +431,17 @@ impl MigrationTrait for Migration {
             User::Table.to_string(),
             Group::Table.to_string(),
             Poll::Table.to_string(),
+            ScheduledPoll::Table.to_string(),
         ] {
             db.execute(Statement::from_string(
                 DbBackend::Postgres,
                 format!(
                     r#"
                     CREATE OR REPLACE TRIGGER updated_at
-                    BEFORE UPDATE ON "{}"
+                    BEFORE UPDATE ON "{table}"
                     FOR EACH ROW
                     EXECUTE FUNCTION set_updated_at();
-                    "#,
-                    table
+                    "#
                 ),
             ))
             .await?;
@@ -376,7 +460,7 @@ impl MigrationTrait for Migration {
         ] {
             db.execute(Statement::from_string(
                 DbBackend::Postgres,
-                format!(r#"DROP TRIGGER IF EXISTS updated_at ON "{}";"#, table),
+                format!(r#"DROP TRIGGER IF EXISTS updated_at ON "{table}";"#),
             ))
             .await?;
         }
@@ -388,8 +472,10 @@ impl MigrationTrait for Migration {
                     .table(EphemeralUserVote::Table)
                     .table(EphemeralUser::Table)
                     .table(Vote::Table)
+                    .table(ScheduledImage::Table)
                     .table(Image::Table)
                     .table(Poll::Table)
+                    .table(ScheduledPoll::Table)
                     .table(GroupJoinRequest::Table)
                     .table(GroupUser::Table)
                     .table(Group::Table)
@@ -422,6 +508,8 @@ enum Permissions {
     Admin,
     ManageGroups,
     ManagePolls,
+    ManageScheduledPolls,
+    ApproveScheduledPollSubmissions,
 }
 
 #[derive(DeriveIden)]
@@ -485,9 +573,10 @@ enum Poll {
     Ends,
     Locked,
     ResultsPublic,
-    AllowedVotes,
+    VotingLimit,
     GroupId,
     OwnerId,
+    ScheduledPollId,
     CreatedAt,
     UpdatedAt,
 }
@@ -502,6 +591,37 @@ enum Image {
     GroupId,
     OwnerId,
     PollId,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ScheduledPoll {
+    Table,
+    Id,
+    Name,
+    NextOccurrence,
+    Cutoff,
+    RecurrenceRule,
+    SubmissionLimit,
+    NeedsApproval,
+    RejectDuplicates,
+    TitleTemplate,
+    Info,
+    VotingLimit,
+    VotingDuration,
+    GroupId,
+    OwnerId,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ScheduledImage {
+    Table,
+    ImageId,
+    ScheduledPollId,
+    NextOccurrence,
+    Approved,
     CreatedAt,
 }
 

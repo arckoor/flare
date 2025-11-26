@@ -1,0 +1,22 @@
+headers = { "Authorization" = "Bearer dummy" }
+
+[checks]
+ignored_auth.enabled = false
+missing_required_header.expected-statuses = [400]
+positive_data_acceptance.expected-statuses = ["2xx", 400, 401, 403, 404, 409, 422, "5xx"]
+
+[generation]
+allow-extra-parameters = false
+with-security-parameters = false
+
+[[operations]]
+include-tag = "oauth"
+enabled = false
+
+[[operations]]
+include-tag = "auth"
+enabled = false
+
+[[operations]]
+include-name = "POST /api/image"
+checks.positive_data_acceptance.expected-statuses = ["2xx", 400]

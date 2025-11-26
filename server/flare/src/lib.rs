@@ -20,11 +20,15 @@ use config::FlareConfig;
 use tokio::signal;
 
 pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
+    tracing::info!("Starting up...");
     let FlareConfig { store, server } = config;
 
-    let state = Arc::new(store::Store::new(store).await);
+    let store = Arc::new(store::Store::new(store).await);
+    #[cfg(not(feature = "sim"))]
+    tasks::Scheduler::schedule_all(store.clone()).await;
+
     let router = {
-        let router = api::routes::build_router(state);
+        let router = api::routes::build_router(store.clone());
         logging::setup_tracing(router)
     };
 
@@ -37,10 +41,9 @@ pub async fn launch(config: FlareConfig) -> Result<(), std::io::Error> {
     {
         #[cfg(not(feature = "sim"))]
         {
-            rustls::crypto::aws_lc_rs::default_provider()
-                .install_default()
-                .expect("Failed to install TLS provider");
-            let config = crypto::mtls::create_tls_config(&server.cert_path);
+            let config =
+                crypto::pki::mtls_config(&store.cert_path, &server.mtls_external, server.mtls_kek)
+                    .expect("Creating mTLS config must work");
             axum_server::bind_rustls(addr, config)
         }
         #[cfg(feature = "sim")]

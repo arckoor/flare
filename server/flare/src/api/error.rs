@@ -98,10 +98,8 @@ impl IntoResponse for RestError {
 impl From<DbErr> for RestError {
     #[track_caller]
     fn from(error: DbErr) -> Self {
-        if let Some(sql_err) = error.sql_err() {
-            if let SqlErr::UniqueConstraintViolation(_) = sql_err {
-                return RestError::conflict("Record already exists");
-            }
+        if let Some(SqlErr::UniqueConstraintViolation(_)) = error.sql_err() {
+            return RestError::conflict("Record already exists");
         } else if let DbErr::RecordNotFound(_) = error {
             return RestError::not_found("Record not found");
         }

@@ -5,7 +5,8 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    api::error::FoundError, config::OAuthConfig, crypto::Cipher, db::Database, time::ONE_MINUTE,
+    api::error::FoundError, config::OAuthConfig, crypto::primitives::Cipher, db::Database,
+    time::ONE_MINUTE,
 };
 
 use super::providers::{OAuthProvider, discord::DiscordOAuth, github::GithubOAuth};
@@ -24,11 +25,11 @@ pub struct OAuth {
 }
 
 impl OAuth {
-    pub fn new(config: &OAuthConfig, db: Arc<Database>) -> Self {
+    pub fn new(config: OAuthConfig, db: Arc<Database>) -> Self {
         let http_client = OAuth::build_http_client(&config.user_agent);
 
-        let discord = Provider::new(config, db.clone(), http_client.clone());
-        let github = Provider::new(config, db.clone(), http_client);
+        let discord = Provider::new(&config, db.clone(), http_client.clone());
+        let github = Provider::new(&config, db.clone(), http_client);
 
         Self {
             discord,

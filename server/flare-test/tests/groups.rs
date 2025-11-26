@@ -111,7 +111,7 @@ fn test_groups() -> turmoil::Result {
                 &group.id,
                 EditGroup {
                     name: Some("test-group-edited".to_string()),
-                    owner: Some(user_a_id.clone()),
+                    owner: Some(user_a_id.parse().unwrap()),
                     updated_at: group.updated_at,
                 },
             )
@@ -228,7 +228,7 @@ fn test_group_errors() -> turmoil::Result {
                     &group_id,
                     EditGroup {
                         name: None,
-                        owner: Some(client_id.clone()),
+                        owner: Some(client_id.parse().unwrap()),
                         updated_at: group.updated_at,
                     }
                 )
@@ -259,12 +259,12 @@ fn test_group_errors() -> turmoil::Result {
                     &group_id,
                     EditGroup {
                         name: None,
-                        owner: Some("abc".to_string()),
+                        owner: Some("abc".parse().unwrap()),
                         updated_at: 0.0,
                     }
                 )
                 .await
-                .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+                .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
             assert!(
                 edit_group(
@@ -294,7 +294,7 @@ fn test_group_errors() -> turmoil::Result {
             assert!(
                 add_group_user(&client, &group_id, "abc")
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+                    .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
             assert!(
@@ -317,7 +317,7 @@ fn test_group_errors() -> turmoil::Result {
             assert!(
                 remove_group_user(&client, &group_id, "abc")
                     .await
-                    .is_err_and(|e| e.status() == Some(StatusCode::NOT_FOUND))
+                    .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
             Ok(())

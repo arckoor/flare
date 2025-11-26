@@ -3,8 +3,8 @@ use flare::config;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().init();
-    tracing::info!("Starting up...");
+    tracing::info!("Parsing config...");
 
-    let config = config::config();
+    let config = config::config("config");
     flare::launch(config).await.unwrap();
 }

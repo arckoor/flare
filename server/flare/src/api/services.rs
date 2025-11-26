@@ -16,16 +16,12 @@ pub async fn serve_image(
 ) -> Result<impl IntoResponse, RestError> {
     let path = store.image_path.join(&name);
     if !path.exists() {
-        return Err(RestError::internal(format!(
-            "Image file {} not found",
-            name
-        )));
+        return Err(RestError::internal(format!("Image file {name} not found",)));
     }
 
     let mime = mime::Mime::from_str(&mime).map_err(|_| {
         RestError::internal(format!(
-            "Got invalid mime type {} from db for image {}",
-            mime, name
+            "Got invalid mime type {mime} from db for image {name}",
         ))
     })?;
 

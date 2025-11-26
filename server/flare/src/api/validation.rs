@@ -7,7 +7,9 @@ use super::{
     error::RestError,
 };
 
-type AspectRatio = String;
+pub const MAX_TITLE_LEN: Option<usize> = Some(255);
+pub const MAX_INFO_LEN: Option<usize> = None;
+pub const MAX_NAME_LEN: Option<usize> = Some(60);
 
 pub fn validate_paginator<S: PaginatedSort>(
     paginator: &Paginator<S>,
@@ -25,19 +27,35 @@ pub fn validate_paginator<S: PaginatedSort>(
         )));
     }
 
+    if paginator
+        .page
+        .checked_mul(paginator.page_size)
+        .is_none_or(|v| v > i64::MAX as u64)
+    {
+        return Err(RestError::bad_req(format!(
+            "Page * Page size must be less than or equal to {}",
+            i64::MAX
+        )));
+    }
+
     Ok(())
 }
 
-// todo if we switch to VARCHAR, add Option<u32> max_length or something
-pub fn validate_user_text(texts: &[&str]) -> Result<(), RestError> {
-    for text in texts {
-        if text.is_empty() {
-            return Err(RestError::bad_req("Text must not be empty".to_string()));
-        }
+pub fn validate_text(text: &str, allow_empty: bool, limit: Option<usize>) -> Result<(), RestError> {
+    if !allow_empty && text.is_empty() {
+        return Err(RestError::bad_req("Text must not be empty".to_string()));
+    }
 
-        if ammonia::is_html(text) {
-            return Err(RestError::bad_req("Text must not contain HTML".to_string()));
-        }
+    if let Some(limit) = limit
+        && text.len() > limit
+    {
+        return Err(RestError::bad_req(format!(
+            "Text must be less than or equal to {limit} characters"
+        )));
+    }
+
+    if ammonia::is_html(text) {
+        return Err(RestError::bad_req("Text must not contain HTML".to_string()));
     }
 
     Ok(())
@@ -46,7 +64,7 @@ pub fn validate_user_text(texts: &[&str]) -> Result<(), RestError> {
 pub fn inspect_validate_image(
     data: &axum::body::Bytes,
     format: &mime::Mime,
-) -> Result<AspectRatio, RestError> {
+) -> Result<String, RestError> {
     fn gcd(mut a: u32, mut b: u32) -> u32 {
         while b != 0 {
             let t = b;
@@ -59,7 +77,7 @@ pub fn inspect_validate_image(
     let image = ImageReader::with_format(
         BufReader::new(std::io::Cursor::new(data)),
         image::ImageFormat::from_mime_type(format)
-            .ok_or(RestError::bad_req("Invalid content type"))?,
+            .ok_or_else(|| RestError::bad_req("Invalid content type"))?,
     )
     .decode()
     .map_err(|_| RestError::bad_req("Failed to read image"))?;
@@ -78,7 +96,7 @@ pub fn inspect_validate_image(
 mod tests {
     use crate::api::{
         api_params::{FetchPollSort, Paginator},
-        validation::{inspect_validate_image, validate_paginator, validate_user_text},
+        validation::{inspect_validate_image, validate_paginator, validate_text},
     };
 
     #[test]
@@ -99,10 +117,13 @@ mod tests {
 
     #[test]
     fn test_validate_text() {
-        assert!(validate_user_text(&["Hello world!", "What a nice day!"]).is_ok());
-        assert!(validate_user_text(&["Hello world!", ""]).is_err());
-        assert!(validate_user_text(&["<div>Hello, world!</div>"]).is_err());
-        assert!(validate_user_text(&["<script>alert('xss')</script>"]).is_err());
+        assert!(validate_text("Hello world!", false, None).is_ok());
+        assert!(validate_text("", true, None).is_ok());
+        assert!(validate_text("", false, None).is_err());
+        assert!(validate_text("0123456789", false, Some(10)).is_ok());
+        assert!(validate_text("0123456789a", false, Some(10)).is_err());
+        assert!(validate_text("<div>Hello, world!</div>", false, None).is_err());
+        assert!(validate_text("<script>alert('xss')</script>", false, None).is_err());
     }
 
     #[test]

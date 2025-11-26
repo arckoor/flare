@@ -372,7 +372,7 @@ fn test_remove_user() -> turmoil::Result {
                     info: "test".to_string(),
                     ends: f64::MAX,
                     images: [images[0].clone(), images[1].clone(), images[2].clone()].into(),
-                    allowed_votes: 2,
+                    voting_limit: 2,
                     group: None,
                 },
             )
@@ -386,8 +386,8 @@ fn test_remove_user() -> turmoil::Result {
                     info: "test".to_string(),
                     ends: f64::MAX,
                     images: [images[4].clone(), images[5].clone(), images[6].clone()].into(),
-                    allowed_votes: 2,
-                    group: Some(big_group.clone()),
+                    voting_limit: 2,
+                    group: Some(big_group.parse().unwrap()),
                 },
             )
             .await
@@ -415,7 +415,7 @@ fn test_remove_user() -> turmoil::Result {
                 &big_group,
                 EditGroup {
                     name: None,
-                    owner: Some(user_2_id.clone()),
+                    owner: Some(user_2_id.parse().unwrap()),
                     updated_at: big_group_updated_at,
                 },
             )

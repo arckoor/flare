@@ -135,7 +135,7 @@ fn test_clean_old_images() -> turmoil::Result {
                 info: Set("test poll".to_string()),
                 ends: Set(f64::MAX),
                 results_public: Set(false),
-                allowed_votes: Set(2),
+                voting_limit: Set(2),
                 owner_id: Set(Some(user.id.clone())),
                 ..Default::default()
             }
@@ -168,6 +168,76 @@ fn test_clean_old_images() -> turmoil::Result {
             Tasks::clean_old_images(db.clone(), image_path.clone()).await;
             assert!(image.exists());
 
+            sea_entity::image::Entity::delete_by_id("123.png")
+                .exec(&db.sea)
+                .await
+                .unwrap();
+            poll.into_active_model().delete(&db.sea).await.unwrap();
+            Tasks::clean_old_images(db.clone(), image_path.clone()).await;
+            assert!(!image.exists());
+
+            tokio::fs::write(&image, png_images()[0]).await.unwrap();
+            let db_image = sea_entity::image::ActiveModel {
+                id: Set("123.png".to_string()),
+                aspect_ratio: Set("1/1".to_string()),
+                mime: Set("image/png".to_string()),
+                hash: Set("".to_string()),
+                owner_id: Set(Some(user.id.clone())),
+                ..Default::default()
+            }
+            .insert(&db.sea)
+            .await
+            .unwrap();
+
+            sea_entity::scheduled_poll::ActiveModel {
+                id: Set("hij".to_string()),
+                name: Set("hij".to_string()),
+                next_occurrence: Set(0.0),
+                cutoff: Set(0.0),
+                voting_duration: Set(0.0),
+                submission_limit: Set(None),
+                title_template: Set("title".to_string()),
+                info: Set("info".to_string()),
+                voting_limit: Set(3),
+                needs_approval: Set(false),
+                reject_duplicates: Set(false),
+                owner_id: Set(Some(user.id.clone())),
+                ..Default::default()
+            }
+            .insert(&db.sea)
+            .await
+            .unwrap();
+
+            let scheduled_image = sea_entity::scheduled_image::ActiveModel {
+                next_occurrence: Set(0.0),
+                scheduled_poll_id: Set("hij".to_string()),
+                image_id: Set("123.png".to_string()),
+                approved: Set(false),
+                ..Default::default()
+            }
+            .insert(&db.sea)
+            .await
+            .unwrap();
+
+            Tasks::clean_old_images(db.clone(), image_path.clone()).await;
+            assert!(image.exists());
+
+            let mut db_image = db_image.into_active_model();
+            db_image.created_at = Set(now().as_secs_f64() - (ONE_WEEK * 2.0));
+            db_image.save(&db.sea).await.unwrap();
+
+            Tasks::clean_old_images(db.clone(), image_path.clone()).await;
+            assert!(image.exists());
+
+            scheduled_image
+                .into_active_model()
+                .delete(&db.sea)
+                .await
+                .unwrap();
+
+            Tasks::clean_old_images(db.clone(), image_path.clone()).await;
+            assert!(!image.exists());
+
             Ok(())
         });
 
@@ -178,7 +248,7 @@ fn test_clean_old_images() -> turmoil::Result {
 #[test]
 fn test_lock_old_polls_and_expire_old_users() -> turmoil::Result {
     flare_test(|sim| {
-        sim.create_basic_scenario();
+        sim.start_api();
 
         sim.client("client", async move {
             let db = setup_db().await;
@@ -198,7 +268,7 @@ fn test_lock_old_polls_and_expire_old_users() -> turmoil::Result {
                 info: Set("".to_string()),
                 ends: Set(f64::MAX),
                 results_public: Set(false),
-                allowed_votes: Set(2),
+                voting_limit: Set(2),
                 group_id: Set(None),
                 owner_id: Set(Some(user.id.clone())),
                 ..Default::default()
@@ -213,7 +283,7 @@ fn test_lock_old_polls_and_expire_old_users() -> turmoil::Result {
                 info: Set("".to_string()),
                 ends: Set(f64::MAX),
                 results_public: Set(false),
-                allowed_votes: Set(2),
+                voting_limit: Set(2),
                 owner_id: Set(Some(user.id.clone())),
                 ..Default::default()
             }

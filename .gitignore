@@ -1,9 +1,12 @@
 .direnv
 .nix-shell
 .vscode/
+.hypothesis
+__pycache__
 target
 server/storage
 openapi.json
 config.toml
-.env
 certs/
+result
+*.log

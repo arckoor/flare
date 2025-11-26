@@ -78,15 +78,22 @@ impl<'a> FlareSimulation<'a> {
 
             async move { flare::launch(config).await.map_err(|e| e.into()) }
         });
+
+        self.client("startup-client", async move {
+            let client = helpers::Http::new_with_cookies(true, "startup-client".to_string());
+            helpers::wait_for_api(&client).await;
+
+            Ok(())
+        });
+
+        self.run().unwrap();
     }
 
     pub fn create_basic_scenario(&mut self) {
         self.start_api();
 
-        self.client("setup-client", async move {
-            let mut client = helpers::Http::new_with_cookies(true, "setup-client".to_string());
-            helpers::wait_for_api(&client).await;
-
+        self.client("login-client", async move {
+            let mut client = helpers::Http::new_with_cookies(true, "login-client".to_string());
             for login_info in helpers::logins() {
                 helpers::login(&mut client, &login_info).await.unwrap();
                 helpers::logout(&mut client).await.unwrap();
@@ -134,5 +141,5 @@ impl<'a> FlareSimulation<'a> {
 pub async fn setup_db() -> Arc<Database> {
     let mut config = FlareConfig::default();
     config.store.storage.postgres_url = PG_URL.to_string();
-    Arc::new(Database::new(&config.store.storage).await)
+    Arc::new(Database::new(config.store.storage).await)
 }

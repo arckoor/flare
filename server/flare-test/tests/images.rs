@@ -154,7 +154,7 @@ fn test_remove_image() -> turmoil::Result {
                     info: "testing poll".to_string(),
                     ends: f64::MAX,
                     images: HashSet::from_iter(images.iter().cloned()),
-                    allowed_votes: 2,
+                    voting_limit: 2,
                     group: None,
                 },
             )
@@ -246,7 +246,7 @@ fn test_aspect_ratio() -> turmoil::Result {
                     info: "some info text".to_string(),
                     ends: f64::MAX,
                     images: [id_16x9.clone(), id_1x1.clone()].into(),
-                    allowed_votes: 1,
+                    voting_limit: 1,
                     group: None,
                 },
             )
@@ -281,7 +281,7 @@ fn test_voting_image() -> turmoil::Result {
                     title: "test".to_string(),
                     info: "test".to_string(),
                     ends: f64::MAX,
-                    allowed_votes: 3,
+                    voting_limit: 3,
                     images: HashSet::from_iter(images.iter().cloned()),
                     group: None,
                 },
@@ -337,8 +337,8 @@ fn test_group_image() -> turmoil::Result {
                     info: "i belong to a group!".to_string(),
                     ends: f64::MAX,
                     images: HashSet::from_iter(images.iter().cloned()),
-                    allowed_votes: 2,
-                    group: Some(client.get_groups()[0].clone()),
+                    voting_limit: 2,
+                    group: Some(client.get_groups()[0].parse().unwrap()),
                 },
             )
             .await

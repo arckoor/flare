@@ -10,14 +10,14 @@ use sea_orm::{ActiveValue::Set, IntoActiveModel, entity::prelude::*};
 use secstr::SecUtf8;
 
 use crate::{
-    crypto::Hasher,
+    crypto::primitives::Hasher,
     store::Store,
     time::{ONE_YEAR, now},
 };
 
 use super::{error::RestError, services::extract_ip};
 
-const COOKIE_NAME: &str = "user-id";
+pub const TRACING_TOKEN: &str = "user-id";
 
 #[derive(Clone, Debug)]
 pub struct InjectedEphemeralUser {
@@ -35,20 +35,23 @@ pub async fn set_tracking_cookie(
         .transpose()?;
 
     if let Some(ip) = ip {
-        let mut eph_user = sea_entity::ephemeral_user::Entity::find()
-            .filter(sea_entity::ephemeral_user::Column::Ip.eq(&ip))
-            .one(&store.db.sea)
-            .await?;
-
-        let cookie = jar.get(COOKIE_NAME).map(|c| c.value().to_string());
-        if eph_user.is_none() && cookie.is_some() {
+        let cookie = jar.get(TRACING_TOKEN).map(|c| c.value().to_string());
+        let mut eph_user = None;
+        if let Some(cookie) = &cookie {
             eph_user = sea_entity::ephemeral_user::Entity::find()
-                .filter(sea_entity::ephemeral_user::Column::Cookie.eq(cookie.as_ref().unwrap()))
+                .filter(sea_entity::ephemeral_user::Column::Cookie.eq(cookie))
                 .one(&store.db.sea)
                 .await?;
         }
-        let cookie = cookie.unwrap_or(cuid2::create_id());
 
+        if eph_user.is_none() {
+            eph_user = sea_entity::ephemeral_user::Entity::find()
+                .filter(sea_entity::ephemeral_user::Column::Ip.eq(&ip))
+                .one(&store.db.sea)
+                .await?;
+        }
+
+        let cookie = cookie.unwrap_or(cuid2::create_id());
         if eph_user.is_none() {
             eph_user = Some(
                 sea_entity::ephemeral_user::ActiveModel {
@@ -64,15 +67,20 @@ pub async fn set_tracking_cookie(
         let eph_user_id = eph_user.id;
 
         let previous_ip = eph_user.ip.clone();
+        let previous_cookie = eph_user.cookie.clone();
         let mut eph_user = eph_user.into_active_model();
         eph_user.last_seen_at = Set(now().as_secs_f64());
         if previous_ip != ip {
             eph_user.ip = Set(ip.clone());
         }
+        if previous_cookie != cookie {
+            eph_user.cookie = Set(cookie.clone());
+        }
+
         eph_user.update(&store.db.sea).await?;
 
         let cookie = store.jwt.build_cookie(
-            COOKIE_NAME.to_string(),
+            TRACING_TOKEN.to_string(),
             &SecUtf8::from(cookie),
             ONE_YEAR,
             false,

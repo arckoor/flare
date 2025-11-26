@@ -2,9 +2,7 @@ use reqwest::StatusCode;
 use sea_entity::sea_orm_active_enums::Permissions;
 use tokio::time::sleep;
 
-use flare_sim::helpers::{
-    Http, auth_ping, get, get_client, login, logins, logout, post, refresh, wait_for_api,
-};
+use flare_sim::helpers::{Http, auth_ping, get, get_client, login, logins, logout, post, refresh};
 use flare_sim::sim::DELAY;
 use flare_sim::test_builder::flare_test;
 use flare_sim::turmoil;
@@ -16,7 +14,6 @@ fn test_tokens() -> turmoil::Result {
 
         sim.client("client", async move {
             let mut client = Http::new_with_cookies(false, "client".to_string());
-            wait_for_api(&client).await;
 
             let token = login(&mut client, &logins()[0]).await.unwrap();
             let access_token = token.access.unsecure().to_string();
@@ -89,7 +86,20 @@ fn test_tokens() -> turmoil::Result {
             let mut client = get_client(0).await.0;
             assert!(auth_ping(&client).await.is_ok());
 
+            let bearer = client.bearer.unwrap();
+            let parts = bearer.split(".").collect::<Vec<&str>>();
+            let header = parts[0];
+            let claims = parts[1];
+
             client.bearer = Some("header.invalid.made-up-signature".to_string());
+            assert!(
+                auth_ping(&client)
+                    .await
+                    .is_err_and(|e| e.status() == Some(StatusCode::UNAUTHORIZED))
+            );
+
+            // properly formatted token
+            client.bearer = Some(format!("{}.{}.bWFkZS11cC1zaWduYXR1cmU", header, claims));
             assert!(
                 auth_ping(&client)
                     .await

@@ -1,6 +1,5 @@
 use std::{net::IpAddr, sync::Arc};
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use reqwest::{Method, Response};
 use sea_entity::sea_orm_active_enums::Permissions;
 use serde::Deserialize;
@@ -9,9 +8,12 @@ use tracing::info;
 use crate::sim::{FLARE_PORT, FLARE_SERVER};
 use flare::{
     api::api_params::{
-        AddGroup, AddPoll, EditGroup, EditPoll, FetchGroup, FetchPoll, FetchPollSort, FetchPolls,
-        FetchResults, FetchVote, FetchVoteResults, FetchVotingPoll, LoginInfo, Paginator,
-        PublishResults, TokenResponse, UpdatedPoll, UploadedImage, UserInfo, Vote,
+        AddGroup, AddPoll, AddScheduledPoll, ApproveScheduledPollSubmission, EditGroup, EditPoll,
+        EditScheduledPoll, EditScheduledPollSubmission, FetchGroup, FetchPoll, FetchPollSort,
+        FetchPolls, FetchResults, FetchScheduledPoll, FetchScheduledPollSort,
+        FetchScheduledPollSubmission, FetchScheduledPollSubmissions, FetchScheduledPolls,
+        FetchVote, FetchVoteResults, FetchVotingPoll, LoginInfo, Paginator, PublishResults, Task,
+        TokenResponse, UpdatedPoll, UploadedImage, UserInfo, Vote,
     },
     auth::jwt::AccessClaims,
 };
@@ -74,11 +76,7 @@ impl Http {
     }
 
     fn decode_claims(&self, bearer: &str) -> AccessClaims {
-        let key = DecodingKey::from_secret(&[]);
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.insecure_disable_signature_validation();
-
-        jsonwebtoken::decode::<AccessClaims>(&bearer, &key, &validation)
+        jsonwebtoken::dangerous::insecure_decode::<AccessClaims>(bearer)
             .unwrap()
             .claims
     }
@@ -347,11 +345,7 @@ pub async fn refresh(client: &mut Http) -> Result<TokenResponse, reqwest::Error>
 }
 
 pub async fn user_info(client: &Http) -> Result<UserInfo, reqwest::Error> {
-    get(client, "/api/user")
-        .send()
-        .await?
-        .json::<UserInfo>()
-        .await
+    req(client, "/api/user").await
 }
 
 pub async fn logout(client: &mut Http) -> Result<(), reqwest::Error> {
@@ -363,6 +357,11 @@ pub async fn logout(client: &mut Http) -> Result<(), reqwest::Error> {
 
 pub async fn remove_user(client: &Http) -> Result<(), reqwest::Error> {
     delete(client, "/api/user").send().await?;
+    Ok(())
+}
+
+pub async fn run_task(client: &Http, task: &Task) -> Result<(), reqwest::Error> {
+    post(client, "/api/admin/run").json(task).send().await?;
     Ok(())
 }
 
@@ -406,9 +405,15 @@ pub async fn fetch_poll(client: &Http, poll_id: &str) -> Result<FetchPoll, reqwe
 
 pub async fn fetch_polls(
     client: &Http,
+    group_id: Option<String>,
     paginator: Option<Paginator<FetchPollSort>>,
 ) -> Result<FetchPolls, reqwest::Error> {
-    let mut res = get(client, "/api/polls");
+    let url = match group_id {
+        Some(id) => format!("/api/polls/{id}"),
+        None => "/api/polls".to_string(),
+    };
+
+    let mut res = get(client, &url);
     if let Some(paginator) = paginator {
         res = res.query(&paginator);
     }
@@ -474,6 +479,107 @@ pub async fn publish_results(
         .await?
         .json::<UpdatedPoll>()
         .await
+}
+
+pub async fn fetch_scheduled_polls(
+    client: &Http,
+    group_id: Option<String>,
+    paginator: Option<Paginator<FetchScheduledPollSort>>,
+) -> Result<FetchScheduledPolls, reqwest::Error> {
+    let url = match group_id {
+        Some(id) => format!("/api/scheduled-polls/{id}"),
+        None => "/api/scheduled-polls".to_string(),
+    };
+
+    let mut res = get(client, &url);
+    if let Some(paginator) = paginator {
+        res = res.query(&paginator);
+    }
+    res.send().await?.json::<FetchScheduledPolls>().await
+}
+
+pub async fn add_scheduled_poll(
+    client: &Http,
+    add_poll: AddScheduledPoll,
+) -> Result<FetchScheduledPoll, reqwest::Error> {
+    post(client, "/api/scheduled-poll")
+        .json(&add_poll)
+        .send()
+        .await?
+        .json::<FetchScheduledPoll>()
+        .await
+}
+
+pub async fn fetch_scheduled_poll(
+    client: &Http,
+    id: &str,
+) -> Result<FetchScheduledPoll, reqwest::Error> {
+    req(client, &format!("/api/scheduled-poll/{id}")).await
+}
+
+pub async fn edit_scheduled_poll(
+    client: &Http,
+    poll_id: &str,
+    edit_poll: EditScheduledPoll,
+) -> Result<FetchScheduledPoll, reqwest::Error> {
+    patch(client, &format!("/api/scheduled-poll/{poll_id}"))
+        .json(&edit_poll)
+        .send()
+        .await?
+        .json::<FetchScheduledPoll>()
+        .await
+}
+
+pub async fn fetch_scheduled_poll_submissions(
+    client: &Http,
+    poll_id: &str,
+) -> Result<FetchScheduledPollSubmissions, reqwest::Error> {
+    req(
+        client,
+        &format!("/api/scheduled-poll/{poll_id}/submissions"),
+    )
+    .await
+}
+
+pub async fn approve_scheduled_poll_submission(
+    client: &Http,
+    poll_id: &str,
+    approve_submission: ApproveScheduledPollSubmission,
+) -> Result<(), reqwest::Error> {
+    let _ = patch(&client, &format!("/api/scheduled-poll/{poll_id}/approve"))
+        .json(&approve_submission)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+pub async fn fetch_scheduled_poll_submission(
+    client: &Http,
+    id: &str,
+) -> Result<FetchScheduledPollSubmission, reqwest::Error> {
+    req(client, &format!("/api/scheduled-poll/{id}/submit")).await
+}
+
+pub async fn edit_scheduled_poll_submission(
+    client: &Http,
+    id: &str,
+    submission: EditScheduledPollSubmission,
+) -> Result<FetchScheduledPollSubmission, reqwest::Error> {
+    patch(&client, &format!("/api/scheduled-poll/{id}/submit"))
+        .json(&submission)
+        .send()
+        .await?
+        .json::<FetchScheduledPollSubmission>()
+        .await
+}
+
+pub async fn remove_scheduled_poll(client: &Http, poll_id: &str) -> Result<(), reqwest::Error> {
+    delete(client, &format!("/api/scheduled-poll/{poll_id}"))
+        .send()
+        .await?;
+
+    Ok(())
 }
 
 pub async fn join_group(client: &Http, group_id: &str) -> Result<(), reqwest::Error> {

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
-use flare::api::api_params::{
-    AddPoll, EditPoll, FetchPollSort, Paginator, PublishResults, UpdatedPoll, Vote,
+use flare::api::{
+    api_params::{AddPoll, EditPoll, FetchPollSort, Paginator, PublishResults, UpdatedPoll, Vote},
+    middleware::TRACING_TOKEN,
 };
 use flare_sim::{
     helpers::{
@@ -16,7 +17,7 @@ use flare_sim::{
 use reqwest::StatusCode;
 
 #[test]
-fn test_add_remove_poll() -> turmoil::Result {
+fn test_poll_add_remove() -> turmoil::Result {
     flare_test(|sim| {
         sim.create_basic_scenario();
 
@@ -31,7 +32,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                 info: "bar".to_string(),
                 ends: f64::MAX,
                 images: [].into(),
-                allowed_votes: 1,
+                voting_limit: 1,
                 group: None,
             };
 
@@ -52,7 +53,7 @@ fn test_add_remove_poll() -> turmoil::Result {
             );
 
             invalid_poll.images = images.iter().map(|i| i.to_string()).collect();
-            invalid_poll.allowed_votes = 0;
+            invalid_poll.voting_limit = 0;
 
             // no votes
             assert!(
@@ -61,7 +62,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            invalid_poll.allowed_votes = images.len() as u32 + 1;
+            invalid_poll.voting_limit = images.len() as u32 + 1;
 
             // too many votes
             assert!(
@@ -70,7 +71,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            invalid_poll.allowed_votes = u32::MAX;
+            invalid_poll.voting_limit = u32::MAX;
 
             // internally it's an i32, so 32::MAX is too big
             assert!(
@@ -79,8 +80,8 @@ fn test_add_remove_poll() -> turmoil::Result {
                     .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
             );
 
-            invalid_poll.allowed_votes = 2;
-            invalid_poll.group = Some("abc".to_string());
+            invalid_poll.voting_limit = 2;
+            invalid_poll.group = Some("abc".parse().unwrap());
 
             // adding to a poll that doesn't exist / we're not a part of
             assert!(
@@ -96,7 +97,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                     info: "some test poll".to_string(),
                     ends: f64::MAX,
                     images: images.iter().skip(1).map(|i| i.to_string()).collect(),
-                    allowed_votes: 2,
+                    voting_limit: 2,
                     group: None,
                 },
             )
@@ -121,7 +122,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                         info: "more testing".to_string(),
                         ends: f64::MAX,
                         images: images.iter().map(|i| i.to_string()).collect(),
-                        allowed_votes: 2,
+                        voting_limit: 2,
                         group: None,
                     }
                 )
@@ -138,7 +139,7 @@ fn test_add_remove_poll() -> turmoil::Result {
                         info: "some test poll".to_string(),
                         ends: f64::MAX,
                         images: [images[0].clone()].into(),
-                        allowed_votes: 1,
+                        voting_limit: 1,
                         group: None,
                     }
                 )
@@ -168,14 +169,14 @@ fn test_add_remove_poll() -> turmoil::Result {
 }
 
 #[test]
-fn test_fetch_polls() -> turmoil::Result {
+fn test_polls_fetch() -> turmoil::Result {
     flare_test(|sim| {
         sim.create_basic_scenario();
 
         sim.client("client", async move {
             let mut client = get_client(0).await.0;
 
-            let polls = fetch_polls(&client, None).await.unwrap();
+            let polls = fetch_polls(&client, None, None).await.unwrap();
 
             assert_eq!(polls.page, 0);
             assert_eq!(polls.page_count, 0);
@@ -184,6 +185,7 @@ fn test_fetch_polls() -> turmoil::Result {
             assert!(
                 fetch_polls(
                     &client,
+                    None,
                     Some(Paginator {
                         page: 1,
                         page_size: 20,
@@ -198,6 +200,7 @@ fn test_fetch_polls() -> turmoil::Result {
             assert!(
                 fetch_polls(
                     &client,
+                    None,
                     Some(Paginator {
                         page: 0,
                         page_size: 0,
@@ -212,6 +215,7 @@ fn test_fetch_polls() -> turmoil::Result {
             assert!(
                 fetch_polls(
                     &client,
+                    None,
                     Some(Paginator {
                         page: 0,
                         page_size: 200,
@@ -254,7 +258,7 @@ fn test_fetch_polls() -> turmoil::Result {
                         info: "some test poll".to_string(),
                         ends,
                         images: images.iter().map(|i| i.to_string()).collect(),
-                        allowed_votes: 2,
+                        voting_limit: 2,
                         group: None,
                     },
                 )
@@ -274,13 +278,14 @@ fn test_fetch_polls() -> turmoil::Result {
                 }
             }
 
-            let fetched_polls = fetch_polls(&client, None).await.unwrap();
+            let fetched_polls = fetch_polls(&client, None, None).await.unwrap();
             assert_eq!(fetched_polls.polls.len(), polls.len());
             assert_eq!(fetched_polls.page_count, 1);
             assert_eq!(fetched_polls.page, 0);
 
             let paged_polls = fetch_polls(
                 &client,
+                None,
                 Some(Paginator {
                     page: 1,
                     page_size: 2,
@@ -297,6 +302,7 @@ fn test_fetch_polls() -> turmoil::Result {
 
             let paged_polls = fetch_polls(
                 &client,
+                None,
                 Some(Paginator {
                     page: 0,
                     page_size: 3,
@@ -311,6 +317,7 @@ fn test_fetch_polls() -> turmoil::Result {
 
             let reversed_polls = fetch_polls(
                 &client,
+                None,
                 Some(Paginator {
                     page: 0,
                     page_size: 3,
@@ -329,6 +336,7 @@ fn test_fetch_polls() -> turmoil::Result {
 
             let sorted_by_title = fetch_polls(
                 &client,
+                None,
                 Some(Paginator {
                     page: 0,
                     page_size: 3,
@@ -345,6 +353,7 @@ fn test_fetch_polls() -> turmoil::Result {
 
             let sorted_by_title = fetch_polls(
                 &client,
+                None,
                 Some(Paginator {
                     page: 0,
                     page_size: 3,
@@ -363,7 +372,7 @@ fn test_fetch_polls() -> turmoil::Result {
             login(&mut client, &logins()[1]).await.unwrap();
 
             assert!(
-                fetch_polls(&client, None)
+                fetch_polls(&client, None, None)
                     .await
                     .is_ok_and(|p| p.polls.is_empty())
             );
@@ -384,7 +393,7 @@ fn test_fetch_polls() -> turmoil::Result {
 }
 
 #[test]
-fn test_edit_poll() -> turmoil::Result {
+fn test_poll_edit() -> turmoil::Result {
     flare_test(|sim| {
         sim.create_basic_scenario();
 
@@ -403,7 +412,7 @@ fn test_edit_poll() -> turmoil::Result {
                     info: "editing c:".to_string(),
                     ends: 0.0,
                     images: initial_images.iter().cloned().collect(),
-                    allowed_votes: 1,
+                    voting_limit: 1,
                     group: None,
                 },
             )
@@ -431,7 +440,7 @@ fn test_edit_poll() -> turmoil::Result {
                     remove_images: Some([initial_images[0].clone()].into()),
                     info: None,
                     ends: None,
-                    allowed_votes: None,
+                    voting_limit: None,
                     updated_at: poll.updated_at,
                 },
             )
@@ -466,7 +475,7 @@ fn test_edit_poll() -> turmoil::Result {
                         title: Some("test".to_string()),
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: None,
                         remove_images: None,
                         updated_at: poll.updated_at,
@@ -485,7 +494,7 @@ fn test_edit_poll() -> turmoil::Result {
                         title: None,
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: None,
                         remove_images: Some(current_images.iter().cloned().collect()),
                         updated_at: poll.updated_at,
@@ -504,7 +513,7 @@ fn test_edit_poll() -> turmoil::Result {
                         title: None,
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: None,
                         remove_images: Some(current_images.iter().skip(1).cloned().collect()),
                         updated_at: poll.updated_at,
@@ -523,7 +532,7 @@ fn test_edit_poll() -> turmoil::Result {
                         title: None,
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: Some(current_images.iter().cloned().collect()),
                         remove_images: None,
                         updated_at: poll.updated_at,
@@ -556,7 +565,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                         info: "<script>alert('xss')</script>".to_string(),
                         ends: 0.0,
                         images: [].into(),
-                        allowed_votes: 1,
+                        voting_limit: 1,
                         group: None,
                     }
                 )
@@ -572,7 +581,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                         info: "Very friendly poll, nothing to worry about here :)".to_string(),
                         ends: 0.0,
                         images: [].into(),
-                        allowed_votes: 1,
+                        voting_limit: 1,
                         group: None,
                     }
                 )
@@ -589,7 +598,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                     info: "Very friendly poll, nothing to worry about here :)".to_string(),
                     ends: 0.0,
                     images: HashSet::from_iter(images.iter().cloned()),
-                    allowed_votes: 1,
+                    voting_limit: 1,
                     group: None,
                 },
             )
@@ -604,7 +613,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                         title: Some("<script>alert('xss')</script>".to_string()),
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: None,
                         remove_images: None,
                         updated_at: poll.updated_at,
@@ -622,7 +631,7 @@ fn test_poll_text_validation() -> turmoil::Result {
                         title: None,
                         info: Some("<script>alert('xss')</script>".to_string()),
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: None,
                         remove_images: None,
                         updated_at: poll.updated_at,
@@ -666,7 +675,7 @@ fn test_voting() -> turmoil::Result {
                     info: "some test poll".to_string(),
                     ends: 0.0,
                     images: [images[0].clone(), images[1].clone()].into(),
-                    allowed_votes: 2,
+                    voting_limit: 2,
                     group: None,
                 },
             )
@@ -697,7 +706,7 @@ fn test_voting() -> turmoil::Result {
                     info: "some test poll".to_string(),
                     ends: f64::MAX,
                     images: images.iter().map(|i| i.to_string()).collect(),
-                    allowed_votes: 2,
+                    voting_limit: 2,
                     group: None,
                 },
             )
@@ -811,6 +820,15 @@ fn test_voting() -> turmoil::Result {
             .await
             .unwrap_err();
 
+            let original_cookie = voter
+                .cookie_store
+                .lock()
+                .unwrap()
+                .iter_unexpired()
+                .find(|x| x.name() == TRACING_TOKEN)
+                .unwrap()
+                .clone();
+
             // we ditch the cookies, but we still have the same ip
             let voter = get_client(1).await.0;
 
@@ -824,6 +842,19 @@ fn test_voting() -> turmoil::Result {
                 )
                 .await
                 .is_err_and(|e| e.status() == Some(StatusCode::BAD_REQUEST))
+            );
+
+            // we ditched the cookie, but were still recognised by ip
+            // but we should get a new cookie
+            assert_ne!(
+                &original_cookie,
+                voter
+                    .cookie_store
+                    .lock()
+                    .unwrap()
+                    .iter_unexpired()
+                    .find(|x| x.name() == TRACING_TOKEN)
+                    .unwrap()
             );
 
             // we are someone completely else, so we can vote
@@ -870,7 +901,7 @@ fn test_results() -> turmoil::Result {
                     info: "some test poll".to_string(),
                     ends: f64::MAX,
                     images: images.iter().map(|i| i.to_string()).collect(),
-                    allowed_votes: 4,
+                    voting_limit: 4,
                     group: None,
                 },
             )
@@ -940,7 +971,7 @@ fn test_results() -> turmoil::Result {
                     title: None,
                     info: None,
                     ends: Some(0.0),
-                    allowed_votes: None,
+                    voting_limit: None,
                     add_images: None,
                     remove_images: None,
                     updated_at: poll.updated_at,
@@ -985,9 +1016,13 @@ fn test_results() -> turmoil::Result {
             assert_eq!(*results.votes.get(images[4].as_str()).unwrap(), 0);
 
             let fetched_results = fetch_voting_results(&voter_1, &poll.id).await.unwrap();
-            assert_eq!(fetched_results.first, images[0]);
-            assert_eq!(fetched_results.second, images[1]);
-            assert_eq!(fetched_results.third, Some(images[2].clone()));
+            assert_eq!(fetched_results.first.len(), 1);
+            assert_eq!(fetched_results.second.len(), 1);
+            assert_eq!(fetched_results.third.len(), 1);
+
+            assert_eq!(fetched_results.first[0], images[0]);
+            assert_eq!(fetched_results.second[0], images[1]);
+            assert_eq!(fetched_results.third[0], images[2].clone());
             for image in images.iter().skip(3) {
                 assert!(fetched_results.remaining.contains(image));
             }
@@ -1021,7 +1056,7 @@ fn test_results() -> turmoil::Result {
                     title: None,
                     info: None,
                     ends: None,
-                    allowed_votes: None,
+                    voting_limit: None,
                     add_images: None,
                     remove_images: Some([images[0].clone()].into()),
                     updated_at: poll.updated_at,
@@ -1068,12 +1103,38 @@ fn test_group_poll() -> turmoil::Result {
                     info: "multiple users can access this".to_string(),
                     ends: f64::MAX,
                     images: images[..4].iter().cloned().collect(),
-                    allowed_votes: 2,
-                    group: Some(group_id.clone()),
+                    voting_limit: 2,
+                    group: Some(group_id.parse().unwrap()),
                 },
             )
             .await
             .unwrap();
+
+            assert_eq!(
+                fetch_polls(&client, None, None).await.unwrap().polls.len(),
+                1
+            );
+            assert_eq!(
+                fetch_polls(&client, Some(group_id.to_string()), None)
+                    .await
+                    .unwrap()
+                    .polls
+                    .len(),
+                1
+            );
+
+            assert_eq!(
+                fetch_polls(&user_b, None, None).await.unwrap().polls.len(),
+                0
+            );
+            assert_eq!(
+                fetch_polls(&user_b, Some(group_id.to_string()), None)
+                    .await
+                    .unwrap()
+                    .polls
+                    .len(),
+                0
+            );
 
             let client_fetched_poll = fetch_poll(&client, &poll.id).await.unwrap();
             let user_a_fetched_poll = fetch_poll(&user_a, &poll.id).await.unwrap();
@@ -1081,8 +1142,8 @@ fn test_group_poll() -> turmoil::Result {
             assert_eq!(client_fetched_poll.info, user_a_fetched_poll.info);
             assert_eq!(client_fetched_poll.ends, user_a_fetched_poll.ends);
             assert_eq!(
-                client_fetched_poll.allowed_votes,
-                user_a_fetched_poll.allowed_votes
+                client_fetched_poll.voting_limit,
+                user_a_fetched_poll.voting_limit
             );
             assert_eq!(client_fetched_poll.group, user_a_fetched_poll.group);
             for img in &images[..4] {
@@ -1106,7 +1167,7 @@ fn test_group_poll() -> turmoil::Result {
                         title: None,
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: Some([images[5].clone()].into()),
                         remove_images: None,
                         updated_at: poll.updated_at,
@@ -1123,7 +1184,7 @@ fn test_group_poll() -> turmoil::Result {
                     title: None,
                     info: None,
                     ends: None,
-                    allowed_votes: None,
+                    voting_limit: None,
                     add_images: Some([images[5].clone()].into()),
                     remove_images: None,
                     updated_at: poll.updated_at,
@@ -1145,7 +1206,7 @@ fn test_group_poll() -> turmoil::Result {
                         title: None,
                         info: None,
                         ends: None,
-                        allowed_votes: None,
+                        voting_limit: None,
                         add_images: Some([user_a_img.clone()].into()),
                         remove_images: Some([images[5].clone()].into()),
                         updated_at: poll.updated_at,
@@ -1183,7 +1244,7 @@ fn test_group_poll() -> turmoil::Result {
                     info: "needs to be added to group later".to_string(),
                     ends: f64::MAX,
                     images: client_images.iter().cloned().collect(),
-                    allowed_votes: 2,
+                    voting_limit: 2,
                     group: None,
                 },
             )

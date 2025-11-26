@@ -4,7 +4,7 @@ use secstr::{SecStr, SecUtf8};
 use serde::Deserialize;
 
 use crate::{
-    crypto::{deserialize_secstr_hex, deserialize_secutf8},
+    crypto::secstr::{deserialize_secstr_hex, deserialize_secutf8},
     time::{ONE_DAY, ONE_HOUR, ONE_MONTH},
 };
 
@@ -49,9 +49,9 @@ pub struct JwtConfig {
     #[serde(deserialize_with = "deserialize_duration")]
     pub refresh_expiry: Duration,
     #[serde(deserialize_with = "deserialize_secutf8")]
-    pub access_passphrase: SecUtf8,
+    pub access_kek: SecUtf8,
     #[serde(deserialize_with = "deserialize_secutf8")]
-    pub refresh_passphrase: SecUtf8,
+    pub refresh_kek: SecUtf8,
     pub domain: String,
 }
 
@@ -78,7 +78,9 @@ pub struct OAuthProvider {
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub port: u16,
-    pub cert_path: PathBuf,
+    #[serde(deserialize_with = "deserialize_secutf8")]
+    pub mtls_kek: SecUtf8,
+    pub mtls_external: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,9 +96,9 @@ pub struct FlareConfig {
     pub server: ServerConfig,
 }
 
-pub fn config() -> FlareConfig {
+pub fn config(base: &str) -> FlareConfig {
     let config = config::Config::builder()
-        .add_source(config::File::with_name("config"))
+        .add_source(config::File::with_name(base))
         .build()
         .expect("Failed to load config");
 
@@ -121,8 +123,8 @@ impl Default for FlareConfig {
                 jwt: JwtConfig {
                     access_expiry: Duration::from_secs(ONE_HOUR as u64),
                     refresh_expiry: Duration::from_secs(ONE_MONTH as u64),
-                    access_passphrase: SecUtf8::from(""),
-                    refresh_passphrase: SecUtf8::from(""),
+                    access_kek: SecUtf8::from(""),
+                    refresh_kek: SecUtf8::from(""),
                     domain: "localhost".to_string(),
                 },
                 oauth: OAuthConfig {
@@ -142,7 +144,8 @@ impl Default for FlareConfig {
             },
             server: ServerConfig {
                 port: 8080,
-                cert_path: PathBuf::from("./certs"),
+                mtls_external: PathBuf::from("./certs"),
+                mtls_kek: SecUtf8::from(""),
             },
         }
     }

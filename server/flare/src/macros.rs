@@ -6,13 +6,6 @@ macro_rules! requires {
 }
 
 #[macro_export]
-macro_rules! validate_text {
-    ($($text:expr),* $(,)?) => {
-        validate_user_text(&[$($text),*])?
-    };
-}
-
-#[macro_export]
 macro_rules! transaction {
     ($sea:expr, $txn:ident, $body:block) => {
         $sea.transaction(|$txn| {

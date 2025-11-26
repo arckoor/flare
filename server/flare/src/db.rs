@@ -18,7 +18,7 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn new(config: &StorageConfig) -> Self {
+    pub async fn new(config: StorageConfig) -> Self {
         let mut opt = ConnectOptions::new(&config.postgres_url);
         opt.sqlx_slow_statements_logging_settings(
             tracing::log::LevelFilter::Warn,
@@ -27,7 +27,7 @@ impl Database {
         .acquire_timeout(Duration::from_secs(2));
 
         #[cfg(not(feature = "sim"))]
-        opt.sqlx_logging_level(tracing::log::LevelFilter::Debug);
+        opt.sqlx_logging(false);
 
         let sea = sea_orm::Database::connect(opt)
             .await
@@ -80,12 +80,12 @@ impl Database {
 
         match oauth_user {
             Some((_, Some(user))) => {
-                if let Some(existing_user) = existing_user {
-                    if user.id != existing_user {
-                        return Err(RestError::forbidden(
-                            "This account is already linked to a user".to_string(),
-                        ));
-                    }
+                if let Some(existing_user) = existing_user
+                    && user.id != existing_user
+                {
+                    return Err(RestError::forbidden(
+                        "This account is already linked to a user".to_string(),
+                    ));
                 }
 
                 Ok(user)
@@ -132,11 +132,20 @@ impl Database {
         user_id: &str,
         groups: Vec<String>,
         group_id: Option<String>,
+        with_scheduled: bool,
     ) -> sea_orm::Condition {
-        sea_orm::Condition::any()
-            .add(sea_entity::poll::Column::OwnerId.eq(user_id))
-            .add(sea_entity::poll::Column::GroupId.is_in(groups))
+        sea_orm::Condition::all()
+            .add(
+                sea_orm::Condition::any()
+                    .add(sea_entity::poll::Column::OwnerId.eq(user_id))
+                    .add(sea_entity::poll::Column::GroupId.is_in(groups)),
+            )
             .add_option(group_id.map(|id| sea_entity::poll::Column::GroupId.eq(id)))
+            .add_option(
+                (!with_scheduled)
+                    .then_some(())
+                    .map(|_| sea_entity::poll::Column::ScheduledPollId.is_null()),
+            )
     }
 
     pub async fn remove_user_from_group<C>(db: &C, group: &str, user: &str) -> Result<(), RestError>

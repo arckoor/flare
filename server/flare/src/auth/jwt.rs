@@ -13,15 +13,22 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use redis::AsyncCommands;
 use sea_entity::sea_orm_active_enums::Permissions;
 use sea_orm::entity::prelude::*;
-use secstr::{SecStr, SecUtf8};
+use secstr::SecUtf8;
 use serde::{Deserialize, Serialize};
 
-use crate::{api::error::RestError, config::JwtConfig, db::Database, time::now};
+use crate::{
+    api::error::RestError,
+    config::JwtConfig,
+    crypto::{self, pki::Key},
+    db::Database,
+    time::now,
+};
 
 pub const REFRESH_TOKEN: &str = "refresh-token";
 pub const REFRESH_INDICATOR: &str = "refresh-indicator";
 
-#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+// TODO remove Clone
+#[derive(Serialize, Deserialize, Debug, utoipa::ToSchema, Clone)]
 pub struct AccessClaims {
     pub sub: String,
     pub permissions: Vec<Permissions>,
@@ -30,7 +37,21 @@ pub struct AccessClaims {
     pub iat: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl AccessClaims {
+    pub fn validate(&self, permissions: &[Permissions]) -> Result<(), RestError> {
+        for permission in permissions {
+            if !self.permissions.contains(permission) {
+                return Err(RestError::forbidden(format!(
+                    "You are missing a required permission: {permission:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+// TODO remove Clone
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RefreshClaims {
     sub: String,
     exp: u64,
@@ -43,38 +64,15 @@ struct JWTSettings {
 }
 
 impl JWTSettings {
-    pub fn new(passphrase: &SecUtf8, path: &Path, name: &str) -> Self {
-        let (priv_, pub_) = Self::load_keys(passphrase, path, name).unwrap();
-        Self {
-            encoding_key: EncodingKey::from_ed_pem(priv_.unsecure()).unwrap(),
-            decoding_key: DecodingKey::from_ed_pem(pub_.unsecure()).unwrap(),
-        }
-    }
+    const ALGO_NAME: &str = "Ed25519";
 
-    fn load_keys(
-        passphrase: &SecUtf8,
-        path: &Path,
-        name: &str,
-    ) -> Result<(SecStr, SecStr), RestError> {
-        let p = path.join(format!("{name}.key"));
-        if !std::fs::exists(&p)? {
-            Self::generate_keys(passphrase, path, name)?;
-        }
-        let pem = std::fs::read_to_string(p)?;
-        let prv = botan::Privkey::load_encrypted_pem(&pem, passphrase.unsecure())?;
-        Ok((
-            SecStr::new(prv.pem_encode()?.as_bytes().to_vec()),
-            SecStr::new(prv.pubkey()?.pem_encode()?.as_bytes().to_vec()),
-        ))
-    }
+    pub fn new(kek: SecUtf8, path: &Path, name: &str) -> Result<Self, RestError> {
+        let key = Key::new(path, name, Self::ALGO_NAME, true, Some(&kek))?;
 
-    fn generate_keys(passphrase: &SecUtf8, path: &Path, name: &str) -> Result<(), RestError> {
-        let mut rng = botan::RandomNumberGenerator::new_system()?;
-        let prv = botan::Privkey::create("Ed25519", "", &mut rng)?
-            .pem_encode_encrypted(passphrase.unsecure(), &mut rng)?;
-        let path = path.join(format!("{name}.key"));
-        std::fs::write(path, prv)?;
-        Ok(())
+        Ok(Self {
+            encoding_key: EncodingKey::from_ed_pem(key.private_pem()?.as_bytes()).unwrap(),
+            decoding_key: DecodingKey::from_ed_pem(key.public_pem()?.as_bytes()).unwrap(),
+        })
     }
 }
 
@@ -93,9 +91,13 @@ impl Jwt {
     const ACCESS_PREFIX: &'static str = "access";
     const REFRESH_PREFIX: &'static str = "refresh";
 
-    pub fn new(config: &JwtConfig, path: PathBuf, db: Arc<Database>) -> Self {
-        let access = JWTSettings::new(&config.access_passphrase, &path, "access");
-        let refresh = JWTSettings::new(&config.refresh_passphrase, &path, "refresh");
+    pub fn new(config: JwtConfig, path: PathBuf, db: Arc<Database>) -> Self {
+        crypto::jwt::default_provider()
+            .install_default()
+            .expect("Failed to install JWT provider");
+
+        let access = JWTSettings::new(config.access_kek, &path, "access").unwrap();
+        let refresh = JWTSettings::new(config.refresh_kek, &path, "refresh").unwrap();
 
         Self {
             domain: config.domain.to_string(),
@@ -183,14 +185,7 @@ impl Jwt {
         permissions: &[Permissions],
     ) -> Result<AccessClaims, RestError> {
         let claims = self.decode_access(auth.token()).await?;
-        for permission in permissions {
-            if !claims.permissions.contains(permission) {
-                return Err(RestError::forbidden(format!(
-                    "You are missing a required permission: {permission:?}"
-                )));
-            }
-        }
-
+        claims.validate(permissions)?;
         Ok(claims)
     }
 
@@ -305,15 +300,13 @@ impl Jwt {
         expiry: f64,
         http_only: bool,
     ) -> Cookie<'static> {
-        let mut builder = Cookie::build((name, value.unsecure().to_string()))
+        let builder = Cookie::build((name, value.unsecure().to_string()))
             .path("/api/")
             .secure(true)
             .same_site(cookie::SameSite::Strict)
-            .max_age(cookie::time::Duration::seconds_f64(expiry));
+            .max_age(cookie::time::Duration::seconds_f64(expiry))
+            .http_only(http_only);
 
-        if http_only {
-            builder = builder.http_only(true);
-        }
         #[cfg(not(feature = "sim"))]
         let builder = builder.domain(self.domain.clone());
         builder.build()
@@ -377,10 +370,10 @@ impl Jwt {
 
     async fn check_expiry(&self, prefix: &str, id: &str, iat: u64) -> Result<(), RestError> {
         let expiry = self.get_nbf(prefix, id).await?;
-        if let Some(expiry) = expiry {
-            if expiry > iat {
-                return Err(RestError::forbidden("Token has been revoked"));
-            }
+        if let Some(expiry) = expiry
+            && expiry > iat
+        {
+            return Err(RestError::forbidden("Token has been revoked"));
         }
 
         Ok(())
